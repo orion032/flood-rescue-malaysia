@@ -1,0 +1,6 @@
+{
+  "name": "Flood Rescue Map Malaysia",
+  "description": "District flood rescue coordination platform connecting family SOS reports, OKU boarding assistance, boat dispatch, evacuation centres (PPS), and power restoration updates.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
