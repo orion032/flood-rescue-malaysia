@@ -8,20 +8,39 @@ import {
   Zap,
 } from 'lucide-react';
 import {
-  BoatUnit,
   DemoRole,
   DrillBaseline,
+  DrillEvent,
   LanguageCode,
   RescueCase,
 } from '../types/rescue';
-import { computeDrillComparison } from '../utils/rescueLogic';
+import { computeDrillComparison, type DrillComparisonResult } from '../utils/rescueLogic';
 import { DEMO_AREA_INFO } from '../data/seedData';
 import { TRANSLATIONS } from '../i18n/translations';
+
+const NOT_MEASURED = 'Not measured yet';
+
+function headlineText(headline: DrillComparisonResult['headline']): string {
+  if (!headline) return 'Verification time not measured yet';
+  if (headline.direction === 'faster') {
+    return `${headline.percent}% faster pickup verification than the paper baseline`;
+  }
+  if (headline.direction === 'slower') {
+    return `${headline.percent}% slower than the paper baseline`;
+  }
+  return 'Same verification time as the paper baseline';
+}
+
+function headlineClass(headline: DrillComparisonResult['headline']): string {
+  if (headline?.direction === 'faster') return 'text-emerald-800';
+  if (headline?.direction === 'slower') return 'text-rose-800';
+  return 'text-slate-600';
+}
 
 interface DrillBenchmarkViewProps {
   lang: LanguageCode;
   cases: RescueCase[];
-  boats: BoatUnit[];
+  drillEvents: DrillEvent[];
   baseline: DrillBaseline;
   onUpdateBaseline: (next: DrillBaseline) => void;
   onTriggerDemoScenario: (
@@ -34,13 +53,22 @@ interface DrillBenchmarkViewProps {
 export const DrillBenchmarkView: React.FC<DrillBenchmarkViewProps> = ({
   lang,
   cases,
-  boats,
+  drillEvents,
   baseline,
   onUpdateBaseline,
   onTriggerDemoScenario,
 }) => {
   const t = TRANSLATIONS[lang];
-  const comparison = computeDrillComparison(cases, boats, baseline);
+  const comparison = computeDrillComparison(cases, drillEvents, baseline);
+  const { digitalVerify, digitalAssignments, digitalPickups, headline } = comparison;
+  const verifyValueClass =
+    headline?.direction === 'faster'
+      ? 'font-mono tabular-nums font-semibold text-emerald-800'
+      : headline?.direction === 'slower'
+        ? 'font-mono tabular-nums font-semibold text-rose-800'
+        : 'font-mono tabular-nums font-semibold text-slate-700';
+  const countValueClass = 'font-mono tabular-nums font-semibold text-emerald-800';
+  const notMeasuredClass = 'text-slate-500 italic';
 
   return (
     <div className="space-y-6">
@@ -69,8 +97,8 @@ export const DrillBenchmarkView: React.FC<DrillBenchmarkViewProps> = ({
               Edit baseline numbers after running a live district drill.
             </p>
           </div>
-          <span className="text-xs font-mono tabular-nums text-emerald-800 font-medium">
-            {comparison.verifyTimeReductionPct}% faster pickup verification
+          <span className={`text-xs font-mono tabular-nums font-medium ${headlineClass(headline)}`}>
+            {headlineText(headline)}
           </span>
         </div>
 
@@ -108,8 +136,12 @@ export const DrillBenchmarkView: React.FC<DrillBenchmarkViewProps> = ({
                     <span>min</span>
                   </div>
                 </td>
-                <td className="py-3.5 px-5 font-mono tabular-nums font-semibold text-emerald-800">
-                  {comparison.digitalVerifyMinutes} min
+                <td className={`py-3.5 px-5 ${digitalVerify ? verifyValueClass : notMeasuredClass}`}>
+                  {digitalVerify
+                    ? `${digitalVerify.minutes} min (${digitalVerify.requestsMeasured} ${
+                        digitalVerify.requestsMeasured === 1 ? 'request' : 'requests'
+                      } verified in this session)`
+                    : `${NOT_MEASURED}. Submit a rescue request, then verify its pickup point in Boat Dispatch & Pickup Cases.`}
                 </td>
                 <td className="py-3.5 px-5 text-slate-600 text-xs">
                   Separate callback contact, neighbour confirmation notes, and movable pickup pin.
@@ -118,7 +150,7 @@ export const DrillBenchmarkView: React.FC<DrillBenchmarkViewProps> = ({
 
               <tr>
                 <td className="py-3.5 px-5 font-medium text-slate-900">
-                  2. Duplicate boat assignments
+                  2. Duplicate or second-destination assignments blocked
                 </td>
                 <td className="py-3.5 px-5 font-mono tabular-nums text-slate-700">
                   <div className="flex items-center gap-2">
@@ -139,8 +171,10 @@ export const DrillBenchmarkView: React.FC<DrillBenchmarkViewProps> = ({
                     <span>incidents</span>
                   </div>
                 </td>
-                <td className="py-3.5 px-5 font-mono tabular-nums font-semibold text-emerald-800">
-                  {comparison.digitalDuplicateAssignments} incidents
+                <td className={`py-3.5 px-5 ${digitalAssignments ? countValueClass : notMeasuredClass}`}>
+                  {digitalAssignments
+                    ? `${digitalAssignments.blocked} blocked of ${digitalAssignments.attempts} assignment attempts`
+                    : NOT_MEASURED}
                 </td>
                 <td className="py-3.5 px-5 text-slate-600 text-xs">
                   Prevents assigning one boat to two active destinations at once or dispatching to unverified pins.
@@ -149,7 +183,7 @@ export const DrillBenchmarkView: React.FC<DrillBenchmarkViewProps> = ({
 
               <tr>
                 <td className="py-3.5 px-5 font-medium text-slate-900">
-                  3. Households still waiting incorrectly marked as rescued
+                  3. Pickup confirmations blocked (no assigned boat marked arrived)
                 </td>
                 <td className="py-3.5 px-5 font-mono tabular-nums text-slate-700">
                   <div className="flex items-center gap-2">
@@ -170,8 +204,10 @@ export const DrillBenchmarkView: React.FC<DrillBenchmarkViewProps> = ({
                     <span>households</span>
                   </div>
                 </td>
-                <td className="py-3.5 px-5 font-mono tabular-nums font-semibold text-emerald-800">
-                  {comparison.digitalFalseRescuedCount} households
+                <td className={`py-3.5 px-5 ${digitalPickups ? countValueClass : notMeasuredClass}`}>
+                  {digitalPickups
+                    ? `${digitalPickups.blocked} blocked of ${digitalPickups.attempts} pickup confirmations`
+                    : NOT_MEASURED}
                 </td>
                 <td className="py-3.5 px-5 text-slate-600 text-xs">
                   &ldquo;Boat arrived&rdquo; and individual &ldquo;Person picked up&rdquo; are strictly separate actions.
@@ -191,10 +227,10 @@ export const DrillBenchmarkView: React.FC<DrillBenchmarkViewProps> = ({
             <div className="space-y-1.5">
               <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
                 <WifiOff className="w-4 h-4 text-amber-700" />
-                <span>1. Offline Continuity &amp; Local Drafts</span>
+                <span>1. Offline Continuity &amp; Waiting to Send</span>
               </div>
               <p className="text-xs text-slate-600">
-                Simulate losing connectivity: saved cases and assignments remain readable, and reports save as local drafts (never marked delivered, never promising an offline basemap).
+                Simulate losing connectivity: saved cases and assignments remain readable, and reports are kept as Waiting to send (never marked delivered, never promising an offline basemap).
               </p>
             </div>
             <button
@@ -214,7 +250,7 @@ export const DrillBenchmarkView: React.FC<DrillBenchmarkViewProps> = ({
                 <span>2. Priority Facts &amp; Boat Destination Lock</span>
               </div>
               <p className="text-xs text-slate-600">
-                Inspect unverified Kampung Kebun Bunga (assign owner &amp; follow-up) vs. verified Jalan Jasa shoplots, and verify that boats cannot be sent to two active destinations at once.
+                Assign Boat 15 to the verified Jalan Jasa shoplots request, check that unverified Kampung Kebun Bunga has an owner and follow-up time, then confirm a boat cannot be sent to two active destinations at once.
               </p>
             </div>
             <button

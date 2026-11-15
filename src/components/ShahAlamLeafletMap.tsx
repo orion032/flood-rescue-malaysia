@@ -51,11 +51,13 @@ import {
   TerrainBasin,
 } from '../data/seedData';
 import {
+  ActionOutcome,
   ClusterablePoint,
   clusterMarkersByZoom,
   findZonesAtPoint,
   getHazardColor,
   getHazardSeverityLabel,
+  PickupEligibility,
   RedactedCaseView,
   VisibleBoatView,
   VisibleMapData,
@@ -173,13 +175,20 @@ interface ShahAlamLeafletMapProps {
   // Admin-only interactive boat/case/command handlers
   allCasesForAdmin?: RescueCase[];
   onAdminAssignBoat?: (caseId: string, boatId: string) => { ok: boolean; error?: string };
-  onAdminAdvanceBoatStatus?: (boatId: string, nextStatus: BoatStatus, eta?: string) => void;
+  onAdminAdvanceBoatStatus?: (boatId: string, nextStatus: BoatStatus, eta?: string) => ActionOutcome;
   onAdminUpdateBoatLocation?: (boatId: string, point: GeoPoint) => void;
-  onAdminConfirmPickedUp?: (caseId: string, boatId: string) => void;
+  onAdminConfirmPickedUp?: (caseId: string, boatId: string) => ActionOutcome;
+  getPickupEligibility?: (caseId: string) => PickupEligibility;
   onAdminConfirmPriority?: (caseId: string, urgency: UrgencyLevel, reason: string) => void;
   onOpenCommandCentreIncident?: (incidentId: string) => void;
   onOpenDispatchTab?: () => void;
+  // Boats with a status change in the "Waiting to send" queue (2.16)
+  queuedBoatIds?: Set<string>;
 }
+
+const EMPTY_ID_SET: Set<string> = new Set<string>();
+
+type AdminFeedback = { ok: boolean; msg: string; queued?: boolean };
 
 type ClusterPayload =
   | { kind: 'boat'; boat: VisibleBoatView }
@@ -222,9 +231,11 @@ export const ShahAlamLeafletMap: React.FC<ShahAlamLeafletMapProps> = ({
   onAdminAdvanceBoatStatus,
   onAdminUpdateBoatLocation,
   onAdminConfirmPickedUp,
+  getPickupEligibility,
   onAdminConfirmPriority,
   onOpenCommandCentreIncident,
   onOpenDispatchTab,
+  queuedBoatIds = EMPTY_ID_SET,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -243,9 +254,14 @@ export const ShahAlamLeafletMap: React.FC<ShahAlamLeafletMapProps> = ({
   const [boatAssignCaseId, setBoatAssignCaseId] = useState<string>('');
   const [boatEtaInput, setBoatEtaInput] = useState<string>('');
   const [boatMoveModeId, setBoatMoveModeId] = useState<string | null>(null);
-  const [adminFeedback, setAdminFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [adminFeedback, setAdminFeedback] = useState<AdminFeedback | null>(null);
 
   const t = TRANSLATIONS[lang];
+
+  // Boat location updates need a connection (2.17): cancel an armed move when going offline.
+  useEffect(() => {
+    if (!isOnline) setBoatMoveModeId(null);
+  }, [isOnline]);
 
   // Apply role-based default layers & reset transient map interaction when account switches
   useEffect(() => {
@@ -1661,6 +1677,8 @@ export const ShahAlamLeafletMap: React.FC<ShahAlamLeafletMapProps> = ({
             <BoatDetailCard
               account={account}
               lang={lang}
+              isOnline={isOnline}
+              isStatusQueued={queuedBoatIds.has(selectedBoat.id)}
               boat={selectedBoat}
               allCasesForAdmin={allCasesForAdmin}
               boatAssignCaseId={boatAssignCaseId}
@@ -1682,11 +1700,13 @@ export const ShahAlamLeafletMap: React.FC<ShahAlamLeafletMapProps> = ({
             <CaseDetailCard
               account={account}
               lang={lang}
+              isOnline={isOnline}
               group={selectedCaseGroup}
               pinMoveMode={pinMoveMode}
               onTogglePinMoveMode={onTogglePinMoveMode}
               onClose={() => onSelectEntity(null)}
               onAdminConfirmPickedUp={onAdminConfirmPickedUp}
+              getPickupEligibility={getPickupEligibility}
               onAdminConfirmPriority={onAdminConfirmPriority}
               onOpenDispatchTab={onOpenDispatchTab}
             />
@@ -1946,17 +1966,19 @@ function ppsLabelForRoute(ppsCenters: PPSCenter[], targetPpsId: string): string 
 interface BoatDetailCardProps {
   account: DemoAccountId;
   lang: LanguageCode;
+  isOnline: boolean;
+  isStatusQueued: boolean;
   boat: VisibleBoatView;
   allCasesForAdmin: RescueCase[];
   boatAssignCaseId: string;
   setBoatAssignCaseId: (v: string) => void;
   boatEtaInput: string;
   setBoatEtaInput: (v: string) => void;
-  adminFeedback: { ok: boolean; msg: string } | null;
-  setAdminFeedback: (v: { ok: boolean; msg: string } | null) => void;
+  adminFeedback: AdminFeedback | null;
+  setAdminFeedback: (v: AdminFeedback | null) => void;
   onClose: () => void;
   onAdminAssignBoat?: (caseId: string, boatId: string) => { ok: boolean; error?: string };
-  onAdminAdvanceBoatStatus?: (boatId: string, nextStatus: BoatStatus, eta?: string) => void;
+  onAdminAdvanceBoatStatus?: (boatId: string, nextStatus: BoatStatus, eta?: string) => ActionOutcome;
   onStartMoveBoat: (boatId: string) => void;
   onOpenDispatchTab?: () => void;
 }
@@ -1964,6 +1986,8 @@ interface BoatDetailCardProps {
 const BoatDetailCard: React.FC<BoatDetailCardProps> = ({
   account,
   lang,
+  isOnline,
+  isStatusQueued,
   boat,
   allCasesForAdmin,
   boatAssignCaseId,
@@ -1990,6 +2014,11 @@ const BoatDetailCard: React.FC<BoatDetailCardProps> = ({
           <div>
             <h3 className="text-sm font-bold text-slate-900">{boat.name}</h3>
             <div className="text-slate-600">{formatBoatStatus(lang, boat.status)}</div>
+            {isStatusQueued && (
+              <span className="mt-0.5 inline-flex items-center text-[11px] font-semibold text-[#0F4C81] bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded">
+                {t.waitingToSendLabel}
+              </span>
+            )}
           </div>
         </div>
         <button
@@ -2053,8 +2082,10 @@ const BoatDetailCard: React.FC<BoatDetailCardProps> = ({
               </select>
               <button
                 type="button"
+                disabled={!isOnline}
+                title={!isOnline ? t.needsConnectionMsg : undefined}
                 onClick={() => {
-                  if (!chosenCaseId) return;
+                  if (!chosenCaseId || !isOnline) return;
                   const res = onAdminAssignBoat(chosenCaseId, boat.id);
                   setAdminFeedback(
                     res.ok
@@ -2062,7 +2093,11 @@ const BoatDetailCard: React.FC<BoatDetailCardProps> = ({
                       : { ok: false, msg: res.error ?? 'Could not assign boat.' }
                   );
                 }}
-                className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-white bg-[#0F4C81] hover:bg-sky-900 rounded-lg shrink-0 cursor-pointer"
+                className={`min-h-[36px] px-3 py-1.5 text-xs font-semibold rounded-lg shrink-0 ${
+                  isOnline
+                    ? 'text-white bg-[#0F4C81] hover:bg-sky-900 cursor-pointer'
+                    : 'text-slate-500 bg-slate-100 border border-slate-200 cursor-not-allowed'
+                }`}
               >
                 {t.assignBtn}
               </button>
@@ -2091,8 +2126,18 @@ const BoatDetailCard: React.FC<BoatDetailCardProps> = ({
                     key={statusKey}
                     type="button"
                     onClick={() => {
-                      onAdminAdvanceBoatStatus(boat.id, statusKey, boatEtaInput);
-                      setAdminFeedback({ ok: true, msg: `${boat.name} — ${label}.` });
+                      const outcome = onAdminAdvanceBoatStatus(boat.id, statusKey, boatEtaInput);
+                      setAdminFeedback(
+                        !outcome.ok
+                          ? { ok: false, msg: outcome.error ?? 'Could not update boat status.' }
+                          : outcome.queued
+                            ? {
+                                ok: true,
+                                queued: true,
+                                msg: `${boat.name}: ${label} · ${t.waitingToSendLabel}`,
+                              }
+                            : { ok: true, msg: `${boat.name} — ${label}.` }
+                      );
                     }}
                     className={`min-h-[36px] px-2.5 py-1.5 text-xs font-medium rounded-lg border cursor-pointer ${
                       boat.status === statusKey
@@ -2109,19 +2154,36 @@ const BoatDetailCard: React.FC<BoatDetailCardProps> = ({
 
           <button
             type="button"
-            onClick={() => onStartMoveBoat(boat.id)}
-            className="w-full min-h-[36px] px-2.5 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg inline-flex items-center justify-center gap-1.5 cursor-pointer"
+            disabled={!isOnline}
+            title={!isOnline ? t.needsConnectionMsg : undefined}
+            onClick={() => {
+              if (!isOnline) return;
+              onStartMoveBoat(boat.id);
+            }}
+            className={`w-full min-h-[36px] px-2.5 py-1.5 text-xs font-medium border rounded-lg inline-flex items-center justify-center gap-1.5 ${
+              isOnline
+                ? 'text-slate-800 bg-white border-slate-300 hover:bg-slate-100 cursor-pointer'
+                : 'text-slate-500 bg-slate-100 border-slate-200 cursor-not-allowed'
+            }`}
           >
             <Crosshair className="w-3.5 h-3.5" />
             <span>{t.updateBoatLocBtn}</span>
           </button>
 
+          {!isOnline && (
+            <div className="text-amber-800">
+              {t.assignBtn} · {t.updateBoatLocBtn}: {t.needsConnectionMsg}
+            </div>
+          )}
+
           {adminFeedback && (
             <div
               className={`px-2.5 py-1.5 rounded-lg border ${
-                adminFeedback.ok
-                  ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                  : 'bg-amber-50 border-amber-300 text-amber-900'
+                !adminFeedback.ok
+                  ? 'bg-amber-50 border-amber-300 text-amber-900'
+                  : adminFeedback.queued
+                    ? 'bg-sky-50 border-sky-200 text-[#0F4C81]'
+                    : 'bg-emerald-50 border-emerald-200 text-emerald-900'
               }`}
             >
               {adminFeedback.msg}
@@ -2146,6 +2208,7 @@ const BoatDetailCard: React.FC<BoatDetailCardProps> = ({
 interface CaseDetailCardProps {
   account: DemoAccountId;
   lang: LanguageCode;
+  isOnline: boolean;
   group: {
     landmark: string;
     items: RedactedCaseView[];
@@ -2154,19 +2217,24 @@ interface CaseDetailCardProps {
   pinMoveMode: boolean;
   onTogglePinMoveMode: (active: boolean) => void;
   onClose: () => void;
-  onAdminConfirmPickedUp?: (caseId: string, boatId: string) => void;
+  onAdminConfirmPickedUp?: (caseId: string, boatId: string) => ActionOutcome;
+  getPickupEligibility?: (caseId: string) => PickupEligibility;
   onAdminConfirmPriority?: (caseId: string, urgency: UrgencyLevel, reason: string) => void;
   onOpenDispatchTab?: () => void;
 }
 
+type PickupFeedback = { tone: 'ok' | 'queued' | 'error'; msg: string };
+
 const CaseDetailCard: React.FC<CaseDetailCardProps> = ({
   account,
   lang,
+  isOnline,
   group,
   pinMoveMode,
   onTogglePinMoveMode,
   onClose,
   onAdminConfirmPickedUp,
+  getPickupEligibility,
   onAdminConfirmPriority,
   onOpenDispatchTab,
 }) => {
@@ -2175,12 +2243,20 @@ const CaseDetailCard: React.FC<CaseDetailCardProps> = ({
   const [urgencyDraft, setUrgencyDraft] = useState<UrgencyLevel>(rep.urgency);
   const [reasonDraft, setReasonDraft] = useState<string>(rep.priorityReason ?? '');
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
+  // Per-case pickup chooser state, keyed by case id (a pickup point can hold several cases).
+  const [pickupBoatChoice, setPickupBoatChoice] = useState<Record<string, string>>({});
+  const [pickupFeedback, setPickupFeedback] = useState<Record<string, PickupFeedback>>({});
 
   useEffect(() => {
     setUrgencyDraft(rep.urgency);
     setReasonDraft(rep.priorityReason ?? '');
     setSavedNotice(null);
   }, [rep.id, rep.urgency, rep.priorityReason]);
+
+  useEffect(() => {
+    setPickupBoatChoice({});
+    setPickupFeedback({});
+  }, [group.landmark]);
 
   return (
     <div className="p-4 space-y-3 text-xs">
@@ -2212,102 +2288,167 @@ const CaseDetailCard: React.FC<CaseDetailCardProps> = ({
       </div>
 
       <div className="space-y-3 divide-y divide-slate-100">
-        {group.items.map((item) => (
-          <div key={item.id} className="pt-2.5 first:pt-0 space-y-1.5">
-            <div className="text-slate-700 space-y-1">
-              <div>
-                <span className="font-semibold">Status:</span>{' '}
-                {formatCaseStatus(lang, item.status)}
-              </div>
-              <div>
-                <span className="font-semibold">Person:</span> {item.displayName}
-              </div>
+        {group.items.map((item) => {
+          // Pickup chooser (2.6, 2.7): only boats assigned to this case and marked arrived.
+          const pickup =
+            account === 'admin' &&
+            onAdminConfirmPickedUp &&
+            getPickupEligibility &&
+            item.status !== 'picked_up'
+              ? getPickupEligibility(item.id)
+              : null;
+          const arrivedBoats = pickup?.arrivedBoats ?? [];
+          const chosenBoatId = pickupBoatChoice[item.id];
+          const selectedPickupBoat =
+            arrivedBoats.find((b) => b.id === chosenBoatId) ?? arrivedBoats[0] ?? null;
+          const feedback = account === 'admin' ? pickupFeedback[item.id] : undefined;
 
-              {account === 'resident' && item.status !== 'picked_up' && (
-                <div className="bg-sky-50 border border-sky-200 rounded-lg px-2.5 py-1.5 text-[#0F4C81] font-medium">
-                  Wait at the confirmed school entrance ({group.landmark}) for boat pickup.
+          return (
+            <div key={item.id} className="pt-2.5 first:pt-0 space-y-1.5">
+              <div className="text-slate-700 space-y-1">
+                <div>
+                  <span className="font-semibold">Status:</span>{' '}
+                  {formatCaseStatus(lang, item.status)}
                 </div>
-              )}
+                <div>
+                  <span className="font-semibold">Person:</span> {item.displayName}
+                </div>
 
-              {account === 'admin' && (
-                <>
-                  <div>
-                    <span className="font-semibold">{t.reportSourceLabel}:</span>{' '}
-                    {item.reportSource}
+                {account === 'resident' && item.status !== 'picked_up' && (
+                  <div className="bg-sky-50 border border-sky-200 rounded-lg px-2.5 py-1.5 text-[#0F4C81] font-medium">
+                    Wait at the confirmed school entrance ({group.landmark}) for boat pickup.
                   </div>
-                  <div>
-                    <span className="font-semibold">{t.lastContactLabel}:</span>{' '}
-                    {item.lastContactTime}
-                  </div>
-                  <div>
-                    <span className="font-semibold">{t.currentDangerLabel}:</span>{' '}
-                    {item.currentDanger}
-                  </div>
-                  <div>
-                    <span className="font-semibold">{t.abilityToEvacuateLabel}:</span>{' '}
-                    {item.abilityToEvacuate}
-                  </div>
-                  {item.assignedCrewNames && item.assignedCrewNames.length > 0 && (
+                )}
+
+                {account === 'admin' && (
+                  <>
                     <div>
-                      <span className="font-semibold">{t.assignedCrewLabel}:</span>{' '}
-                      {item.assignedCrewNames.join(' · ')}
+                      <span className="font-semibold">{t.reportSourceLabel}:</span>{' '}
+                      {item.reportSource}
                     </div>
-                  )}
-                  {item.caseOwner && !item.locationVerified && (
-                    <div className="text-amber-800">
-                      <span className="font-semibold">Follow-up owner:</span> {item.caseOwner}
-                      {item.followUpAction ? ` — ${item.followUpAction}` : ''}
+                    <div>
+                      <span className="font-semibold">{t.lastContactLabel}:</span>{' '}
+                      {item.lastContactTime}
                     </div>
+                    <div>
+                      <span className="font-semibold">{t.currentDangerLabel}:</span>{' '}
+                      {item.currentDanger}
+                    </div>
+                    <div>
+                      <span className="font-semibold">{t.abilityToEvacuateLabel}:</span>{' '}
+                      {item.abilityToEvacuate}
+                    </div>
+                    {item.assignedCrewNames && item.assignedCrewNames.length > 0 && (
+                      <div>
+                        <span className="font-semibold">{t.assignedCrewLabel}:</span>{' '}
+                        {item.assignedCrewNames.join(' · ')}
+                      </div>
+                    )}
+                    {item.caseOwner && !item.locationVerified && (
+                      <div className="text-amber-800">
+                        <span className="font-semibold">Follow-up owner:</span> {item.caseOwner}
+                        {item.followUpAction ? ` — ${item.followUpAction}` : ''}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {!item.isExactLocationHidden && (
+                  <div>
+                    <span className="font-semibold">Last seen:</span> {item.displayAddress}
+                  </div>
+                )}
+                {!item.isCallbackHidden && (
+                  <div>
+                    <span className="font-semibold">Phone:</span>{' '}
+                    <span className="tabular-nums">{item.displayCallbackPhone}</span>
+                  </div>
+                )}
+                {item.okuNeeds.length > 0 && (
+                  <div>
+                    <span className="font-semibold">Assistance needed:</span>{' '}
+                    {item.okuNeeds.join(' · ')}
+                  </div>
+                )}
+              </div>
+
+              {(account === 'admin' || account === 'resident') && (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => onTogglePinMoveMode(!pinMoveMode)}
+                    className="min-h-[36px] px-2.5 py-1 text-xs font-medium text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <Crosshair className="w-3.5 h-3.5" />
+                    <span>{pinMoveMode ? t.pinMoveActiveBtn : t.movePinBtn}</span>
+                  </button>
+                  {pickup && arrivedBoats.length > 1 && (
+                    <select
+                      value={selectedPickupBoat?.id ?? ''}
+                      onChange={(e) =>
+                        setPickupBoatChoice((prev) => ({ ...prev, [item.id]: e.target.value }))
+                      }
+                      aria-label="Select arrived boat"
+                      className="min-w-0 h-9 px-2 text-xs bg-white border border-slate-300 rounded-lg"
+                    >
+                      {arrivedBoats.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.name}
+                        </option>
+                      ))}
+                    </select>
                   )}
-                </>
+                  {pickup && onAdminConfirmPickedUp && (
+                    <button
+                      type="button"
+                      disabled={!selectedPickupBoat}
+                      onClick={() => {
+                        if (!selectedPickupBoat) return;
+                        const outcome = onAdminConfirmPickedUp(item.id, selectedPickupBoat.id);
+                        const next: PickupFeedback = !outcome.ok
+                          ? { tone: 'error', msg: outcome.error ?? 'Could not confirm pickup.' }
+                          : outcome.queued
+                            ? { tone: 'queued', msg: 'Pickup confirmation waiting to send.' }
+                            : { tone: 'ok', msg: `Pickup confirmed with ${selectedPickupBoat.name}.` };
+                        setPickupFeedback((prev) => ({ ...prev, [item.id]: next }));
+                      }}
+                      className={`min-h-[36px] px-2.5 py-1 text-xs font-semibold rounded-lg inline-flex items-center gap-1 ${
+                        selectedPickupBoat
+                          ? 'text-white bg-emerald-700 hover:bg-emerald-800 cursor-pointer'
+                          : 'text-slate-500 bg-slate-100 border border-slate-200 cursor-not-allowed'
+                      }`}
+                    >
+                      <UserCheck className="w-3.5 h-3.5" />
+                      <span>
+                        {arrivedBoats.length === 1
+                          ? `${t.personPickedUpBtn} · ${arrivedBoats[0].name}`
+                          : t.personPickedUpBtn}
+                      </span>
+                    </button>
+                  )}
+                </div>
               )}
 
-              {!item.isExactLocationHidden && (
-                <div>
-                  <span className="font-semibold">Last seen:</span> {item.displayAddress}
-                </div>
+              {pickup?.blocker && (
+                <div className="text-amber-800">{pickup.blocker}</div>
               )}
-              {!item.isCallbackHidden && (
-                <div>
-                  <span className="font-semibold">Phone:</span>{' '}
-                  <span className="tabular-nums">{item.displayCallbackPhone}</span>
-                </div>
-              )}
-              {item.okuNeeds.length > 0 && (
-                <div>
-                  <span className="font-semibold">Assistance needed:</span>{' '}
-                  {item.okuNeeds.join(' · ')}
+
+              {feedback && (
+                <div
+                  className={`px-2.5 py-1.5 rounded-lg border ${
+                    feedback.tone === 'ok'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                      : feedback.tone === 'queued'
+                        ? 'bg-sky-50 border-sky-200 text-[#0F4C81]'
+                        : 'bg-amber-50 border-amber-300 text-amber-900'
+                  }`}
+                >
+                  {feedback.msg}
                 </div>
               )}
             </div>
-
-            {(account === 'admin' || account === 'resident') && (
-              <div className="flex flex-wrap gap-1.5 pt-1">
-                <button
-                  type="button"
-                  onClick={() => onTogglePinMoveMode(!pinMoveMode)}
-                  className="min-h-[36px] px-2.5 py-1 text-xs font-medium text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg inline-flex items-center gap-1 cursor-pointer"
-                >
-                  <Crosshair className="w-3.5 h-3.5" />
-                  <span>{pinMoveMode ? t.pinMoveActiveBtn : t.movePinBtn}</span>
-                </button>
-                {account === 'admin' &&
-                  onAdminConfirmPickedUp &&
-                  item.status !== 'picked_up' &&
-                  item.assignedBoatIds.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => onAdminConfirmPickedUp(item.id, item.assignedBoatIds[0])}
-                      className="min-h-[36px] px-2.5 py-1 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg inline-flex items-center gap-1 cursor-pointer"
-                    >
-                      <UserCheck className="w-3.5 h-3.5" />
-                      <span>{t.personPickedUpBtn}</span>
-                    </button>
-                  )}
-              </div>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {account === 'admin' && onAdminConfirmPriority && (
@@ -2336,11 +2477,18 @@ const CaseDetailCard: React.FC<CaseDetailCardProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              disabled={!isOnline}
+              title={!isOnline ? t.needsConnectionMsg : undefined}
               onClick={() => {
+                if (!isOnline) return;
                 onAdminConfirmPriority(rep.id, urgencyDraft, reasonDraft);
                 setSavedNotice('Priority confirmed.');
               }}
-              className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-white bg-[#0F4C81] hover:bg-sky-900 rounded-lg cursor-pointer"
+              className={`min-h-[36px] px-3 py-1.5 text-xs font-semibold rounded-lg ${
+                isOnline
+                  ? 'text-white bg-[#0F4C81] hover:bg-sky-900 cursor-pointer'
+                  : 'text-slate-500 bg-slate-100 border border-slate-200 cursor-not-allowed'
+              }`}
             >
               {t.confirmPriorityBtn}
             </button>
@@ -2355,6 +2503,7 @@ const CaseDetailCard: React.FC<CaseDetailCardProps> = ({
               </button>
             )}
           </div>
+          {!isOnline && <div className="text-amber-800">{t.needsConnectionMsg}</div>}
           {savedNotice && <div className="text-emerald-800 font-medium">{savedNotice}</div>}
         </div>
       )}

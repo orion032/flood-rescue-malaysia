@@ -9,6 +9,7 @@ import {
   DemoAccountId,
   DemoRole,
   DrillBaseline,
+  DrillEvent,
   GeoPoint,
   HazardSeverity,
   HazardType,
@@ -214,6 +215,8 @@ export function verifyAndMovePickupPin(
     verifiedBy: string;
     timestamp: string;
     confirmedByWho?: string;
+    /** Epoch ms of this verification; only the first in-app verification is kept. */
+    atMs?: number;
   }
 ): { cases: RescueCase[]; boats: BoatUnit[] } {
   const target = cases.find((c) => c.id === caseId);
@@ -231,6 +234,9 @@ export function verifyAndMovePickupPin(
       locationVerified: true,
       verifiedBy: payload.verifiedBy,
       verifiedAt: payload.timestamp,
+      ...(c.verifiedAtMs !== undefined || payload.atMs !== undefined
+        ? { verifiedAtMs: c.verifiedAtMs ?? payload.atMs }
+        : {}),
       confirmedByWho: payload.confirmedByWho?.trim() || c.confirmedByWho,
       confirmedWhen: payload.timestamp,
       status: nextStatus,
@@ -297,9 +303,17 @@ export function confirmCasePriority(
   });
 }
 
+export type AssignmentRejectReason =
+  | 'not_found'
+  | 'unverified'
+  | 'picked_up'
+  | 'duplicate'
+  | 'second_destination';
+
 export interface AssignmentResult {
   ok: boolean;
   error?: string;
+  reason?: AssignmentRejectReason;
   cases: RescueCase[];
   boats: BoatUnit[];
 }
@@ -315,12 +329,13 @@ export function assignBoatToCase(
   const targetBoat = boats.find((b) => b.id === boatId);
 
   if (!targetCase || !targetBoat) {
-    return { ok: false, error: 'Case or boat not found.', cases, boats };
+    return { ok: false, reason: 'not_found', error: 'Case or boat not found.', cases, boats };
   }
 
   if (!targetCase.locationVerified && targetCase.urgency !== 'critical') {
     return {
       ok: false,
+      reason: 'unverified',
       error:
         'Pickup point is unverified. Assign an owner to confirm the location, or confirm Urgent priority first to dispatch while verifying.',
       cases,
@@ -331,6 +346,7 @@ export function assignBoatToCase(
   if (targetCase.status === 'picked_up') {
     return {
       ok: false,
+      reason: 'picked_up',
       error: 'Person has already been picked up.',
       cases,
       boats,
@@ -340,6 +356,7 @@ export function assignBoatToCase(
   if (targetCase.assignedBoatIds.includes(boatId)) {
     return {
       ok: false,
+      reason: 'duplicate',
       error: `${targetBoat.name} is already assigned to this case.`,
       cases,
       boats,
@@ -354,6 +371,7 @@ export function assignBoatToCase(
   ) {
     return {
       ok: false,
+      reason: 'second_destination',
       error: `${targetBoat.name} is currently assigned to "${targetBoat.assignedPickupPoint}". A boat cannot be assigned to two active destinations at once.`,
       cases,
       boats,
@@ -495,14 +513,105 @@ export function advanceBoatStatus(
   return { boats: updatedBoats, cases: updatedCases };
 }
 
+/** Outcome of a UI action handler: applied now, queued offline, or rejected with a reason. */
+export interface ActionOutcome {
+  ok: boolean;
+  queued?: boolean;
+  error?: string;
+}
+
+export type PickupRejectReason =
+  | 'case_not_found'
+  | 'already_picked_up'
+  | 'boat_not_assigned'
+  | 'boat_not_arrived';
+
+export interface PickupResult {
+  ok: boolean;
+  error?: string;
+  reason?: PickupRejectReason;
+  cases: RescueCase[];
+  boats: BoatUnit[];
+}
+
+export interface PickupEligibility {
+  arrivedBoats: BoatUnit[];
+  blocker: string | null;
+}
+
+/**
+ * Lists the assigned boats that can confirm a pickup for this case (status 'arrived'),
+ * in assignment order. When none can, `blocker` explains why.
+ */
+export function getPickupEligibility(
+  cases: RescueCase[],
+  boats: BoatUnit[],
+  caseId: string
+): PickupEligibility {
+  const targetCase = cases.find((c) => c.id === caseId);
+  if (!targetCase) {
+    return { arrivedBoats: [], blocker: 'Rescue request not found.' };
+  }
+  if (targetCase.status === 'picked_up') {
+    return { arrivedBoats: [], blocker: 'Person has already been picked up.' };
+  }
+
+  const assignedBoats = targetCase.assignedBoatIds
+    .map((id) => boats.find((b) => b.id === id))
+    .filter((b): b is BoatUnit => b !== undefined);
+  if (assignedBoats.length === 0) {
+    return { arrivedBoats: [], blocker: 'No boat is assigned to this case yet.' };
+  }
+
+  const arrivedBoats = assignedBoats.filter((b) => b.status === 'arrived');
+  if (arrivedBoats.length === 0) {
+    return { arrivedBoats: [], blocker: 'Waiting for an assigned boat to be marked arrived.' };
+  }
+  return { arrivedBoats, blocker: null };
+}
+
 export function confirmPersonPickedUp(
   cases: RescueCase[],
   boats: BoatUnit[],
   caseId: string,
   boatId: string,
-  timestamp: string,
-  crewLead: string
-): { cases: RescueCase[]; boats: BoatUnit[] } {
+  timestamp: string
+): PickupResult {
+  const targetCase = cases.find((c) => c.id === caseId);
+  if (!targetCase) {
+    return { ok: false, reason: 'case_not_found', error: 'Rescue request not found.', cases, boats };
+  }
+  if (targetCase.status === 'picked_up') {
+    return {
+      ok: false,
+      reason: 'already_picked_up',
+      error: 'Person has already been picked up.',
+      cases,
+      boats,
+    };
+  }
+
+  const boat = boats.find((b) => b.id === boatId);
+  if (!boat || !targetCase.assignedBoatIds.includes(boatId)) {
+    return {
+      ok: false,
+      reason: 'boat_not_assigned',
+      error: `${boat?.name ?? boatId} is not assigned to this case.`,
+      cases,
+      boats,
+    };
+  }
+  if (boat.status !== 'arrived') {
+    return {
+      ok: false,
+      reason: 'boat_not_arrived',
+      error: `An assigned boat must be marked arrived first. ${boat.name} is ${boat.status.replace(/_/g, ' ')}.`,
+      cases,
+      boats,
+    };
+  }
+
+  const crewLead = boat.crewLead;
   const updatedCases = cases.map((c) => {
     if (c.id !== caseId) return c;
     return {
@@ -540,7 +649,7 @@ export function confirmPersonPickedUp(
     };
   });
 
-  return { cases: updatedCases, boats: updatedBoats };
+  return { ok: true, cases: updatedCases, boats: updatedBoats };
 }
 
 export function sendFamilyUpdate(
@@ -614,68 +723,377 @@ export function formatFamilyMemberStatus(rescueCase: RescueCase): string {
   }
 }
 
+/** Effective connection state: offline when the browser reports no network or the demo toggle is offline. */
+export function isAppOnline(browserOnline: boolean, demoOffline: boolean): boolean {
+  return browserOnline && !demoOffline;
+}
+
+// Payload shapes for queued ("Waiting to send") items. Declared as type aliases
+// so they are assignable to LocalDraftAction['payload'] (Record<string, unknown>).
+export type NewCasePayload = { rescueCase: RescueCase };
+export type ReportIssuePayload =
+  | { issueKind: 'road'; roadClosure: RoadClosure }
+  | { issueKind: 'outage'; outage: PowerOutageZone };
+export type UpdateLocationPayload = {
+  caseId: string;
+  mode: 'family_change' | 'pin_move';
+  pickupLandmark: string;
+  confirmedBy: string;
+  coords?: GeoPoint;
+};
+export type AdvanceBoatPayload = {
+  boatId: string;
+  nextStatus: BoatStatus;
+  eta?: string;
+};
+export type ConfirmPickupPayload = { caseId: string; boatId: string };
+
+export type QueuedPayloadByType = {
+  new_case: NewCasePayload;
+  report_issue: ReportIssuePayload;
+  update_location: UpdateLocationPayload;
+  advance_boat: AdvanceBoatPayload;
+  confirm_pickup: ConfirmPickupPayload;
+};
+
 export function enqueueLocalDraft(
   drafts: LocalDraftAction[],
-  draft: Omit<LocalDraftAction, 'id' | 'createdAt'>,
-  timestamp: string
+  draft: Omit<LocalDraftAction, 'id' | 'createdAt' | 'createdAtMs' | 'error'>,
+  timestamp: string,
+  atMs?: number
 ): LocalDraftAction[] {
+  const base = atMs ?? timestamp.replace(/\D+/g, '');
+  const taken = new Set(drafts.map((d) => d.id));
+  let n = drafts.length + 1;
+  // Failed items stay in the queue, so guard against reusing an id.
+  while (taken.has(`draft-${base}-${n}`)) n += 1;
   return [
     ...drafts,
     {
       ...draft,
-      id: `draft-${drafts.length + 1}-${timestamp.replace(/\W+/g, '')}`,
+      id: `draft-${base}-${n}`,
       createdAt: timestamp,
+      createdAtMs: atMs,
     },
   ];
 }
 
-export interface DrillComparisonResult {
-  paperVerifyMinutes: number;
-  digitalVerifyMinutes: number;
-  verifyTimeReductionPct: number;
-  paperDuplicateAssignments: number;
-  digitalDuplicateAssignments: number;
-  paperFalseRescuedCount: number;
-  digitalFalseRescuedCount: number;
+/** Family or reporter changes the pickup point (online path; also used when a queued change is sent). */
+export function applyFamilyLocationChange(
+  cases: RescueCase[],
+  caseId: string,
+  landmark: string,
+  confirmedBy: string,
+  coords: GeoPoint | undefined,
+  timestamp: string
+): RescueCase[] {
+  return cases.map((c) =>
+    c.id === caseId
+      ? {
+          ...c,
+          pickupLandmark: landmark,
+          coordinates: coords ?? c.coordinates,
+          confirmedByWho: confirmedBy,
+          confirmedWhen: timestamp,
+          syncState: 'synced',
+          familyUpdates: [
+            ...c.familyUpdates,
+            {
+              id: `fam-loc-${Date.now()}`,
+              timestamp,
+              sender: 'Reporting Family',
+              text: `Updated pickup point to "${landmark}" (confirmed by ${confirmedBy}).`,
+            },
+          ],
+        }
+      : c
+  );
 }
 
-export function computeDrillComparison(
+/** Moves a case's pickup pin to a new point. */
+export function moveCasePin(
   cases: RescueCase[],
-  boats: BoatUnit[],
-  baseline: DrillBaseline
-): DrillComparisonResult {
-  let digitalDuplicates = 0;
-  for (const c of cases) {
-    const uniqueBoats = new Set(c.assignedBoatIds);
-    if (uniqueBoats.size !== c.assignedBoatIds.length) {
-      digitalDuplicates += c.assignedBoatIds.length - uniqueBoats.size;
+  caseId: string,
+  point: GeoPoint,
+  timestamp: string
+): RescueCase[] {
+  return cases.map((c) =>
+    c.id === caseId ? { ...c, coordinates: point, confirmedWhen: timestamp } : c
+  );
+}
+
+/** Maps an assignBoatToCase result to the drill event recorded for that attempt. */
+export function drillEventForAssignment(
+  result: Pick<AssignmentResult, 'ok' | 'reason'>,
+  atMs: number,
+  caseId: string,
+  boatId: string
+): DrillEvent {
+  const kind = result.ok
+    ? 'assignment_made'
+    : result.reason === 'duplicate'
+      ? 'assignment_blocked_duplicate'
+      : result.reason === 'second_destination'
+        ? 'assignment_blocked_second_destination'
+        : 'assignment_blocked_other';
+  return { kind, atMs, caseId, boatId };
+}
+
+/** Maps a confirmPersonPickedUp result to the drill event recorded for that attempt. */
+export function drillEventForPickup(
+  result: Pick<PickupResult, 'ok' | 'reason'>,
+  atMs: number,
+  caseId: string,
+  boatId: string
+): DrillEvent {
+  const kind = result.ok
+    ? 'pickup_confirmed'
+    : result.reason === 'boat_not_assigned'
+      ? 'pickup_rejected_not_assigned'
+      : result.reason === 'boat_not_arrived'
+        ? 'pickup_rejected_not_arrived'
+        : 'pickup_rejected_other';
+  return { kind, atMs, caseId, boatId };
+}
+
+/** Shared data sets that queued ("Waiting to send") items can change. */
+export interface QueueState {
+  cases: RescueCase[];
+  boats: BoatUnit[];
+  roadClosures: RoadClosure[];
+  outages: PowerOutageZone[];
+}
+
+export interface QueueSendResult {
+  state: QueueState;
+  /** Ids of items applied in this send, in queue order. */
+  sentIds: string[];
+  /** Items not applied, in original order, each with `error` set. Retried on the next send. */
+  remaining: LocalDraftAction[];
+  /** Drill events from pickup confirmations (a rejection is counted once across sends). */
+  events: DrillEvent[];
+}
+
+type QueueStep = { ok: true; state: QueueState } | { ok: false; error: string };
+
+function applyQueuedItem(
+  s: QueueState,
+  item: LocalDraftAction,
+  at: string,
+  atMs: number,
+  sentAt: string
+): QueueStep & { pickup?: PickupResult } {
+  switch (item.payloadType) {
+    case 'new_case': {
+      const { rescueCase } = item.payload as NewCasePayload;
+      if (!rescueCase) return { ok: false, error: 'Rescue request not found.' };
+      if (s.cases.some((c) => c.id === rescueCase.id)) {
+        return { ok: false, error: 'This request was already sent.' };
+      }
+      const sentCase: RescueCase = {
+        ...rescueCase,
+        reportedAt: at,
+        reportedAtMs: atMs,
+        syncState: 'synced',
+        familyUpdates: [
+          {
+            id: `init-${rescueCase.id}`,
+            timestamp: sentAt,
+            sender: 'System Demo',
+            text: `Request made offline at ${at}; sent at ${sentAt}. Coordinator will review danger and pickup location.`,
+          },
+        ],
+      };
+      return { ok: true, state: { ...s, cases: [sentCase, ...s.cases] } };
     }
-    if (!c.locationVerified && c.urgency !== 'critical' && c.assignedBoatIds.length > 0) {
-      digitalDuplicates += 1;
+    case 'report_issue': {
+      const payload = item.payload as ReportIssuePayload;
+      if (payload.issueKind === 'road') {
+        if (s.roadClosures.some((r) => r.id === payload.roadClosure.id)) {
+          return { ok: false, error: 'This request was already sent.' };
+        }
+        return { ok: true, state: { ...s, roadClosures: [payload.roadClosure, ...s.roadClosures] } };
+      }
+      if (s.outages.some((o) => o.id === payload.outage.id)) {
+        return { ok: false, error: 'This request was already sent.' };
+      }
+      return { ok: true, state: { ...s, outages: [payload.outage, ...s.outages] } };
+    }
+    case 'update_location': {
+      const p = item.payload as UpdateLocationPayload;
+      if (!s.cases.some((c) => c.id === p.caseId)) {
+        return { ok: false, error: 'Rescue request not found.' };
+      }
+      if (p.mode === 'pin_move') {
+        if (!p.coords) return { ok: false, error: 'Pin position missing.' };
+        return { ok: true, state: { ...s, cases: moveCasePin(s.cases, p.caseId, p.coords, at) } };
+      }
+      return {
+        ok: true,
+        state: {
+          ...s,
+          cases: applyFamilyLocationChange(s.cases, p.caseId, p.pickupLandmark, p.confirmedBy, p.coords, at),
+        },
+      };
+    }
+    case 'advance_boat': {
+      const p = item.payload as AdvanceBoatPayload;
+      if (!s.boats.some((b) => b.id === p.boatId)) return { ok: false, error: 'Boat not found.' };
+      const r = advanceBoatStatus(s.boats, s.cases, p.boatId, p.nextStatus, at, p.eta);
+      return { ok: true, state: { ...s, boats: r.boats, cases: r.cases } };
+    }
+    case 'confirm_pickup': {
+      const p = item.payload as ConfirmPickupPayload;
+      const r = confirmPersonPickedUp(s.cases, s.boats, p.caseId, p.boatId, at);
+      if (!r.ok) return { ok: false, error: r.error ?? 'Pickup not confirmed.', pickup: r };
+      return { ok: true, state: { ...s, cases: r.cases, boats: r.boats }, pickup: r };
+    }
+    default:
+      return { ok: false, error: 'Unknown queued action.' };
+  }
+}
+
+/**
+ * Sends the queue: applies items in array order using each item's original time.
+ * Applied items are listed in `sentIds`; rejected items stay in `remaining` with a reason.
+ */
+export function applyQueuedActions(
+  state: QueueState,
+  drafts: LocalDraftAction[],
+  sent: { at: string; atMs: number }
+): QueueSendResult {
+  let s = state;
+  const sentIds: string[] = [];
+  const remaining: LocalDraftAction[] = [];
+  const events: DrillEvent[] = [];
+
+  for (const item of drafts) {
+    const at = item.createdAt;
+    const atMs = item.createdAtMs ?? sent.atMs;
+    const step = applyQueuedItem(s, item, at, atMs, sent.at);
+
+    if (step.ok) {
+      s = step.state;
+      sentIds.push(item.id);
+    } else {
+      remaining.push({ ...item, error: step.error });
+    }
+
+    if (step.pickup && (step.ok || item.error === undefined)) {
+      const p = item.payload as ConfirmPickupPayload;
+      events.push(drillEventForPickup(step.pickup, atMs, p.caseId, p.boatId));
     }
   }
 
-  const falseRescued = cases.filter(
-    (c) => c.status === 'picked_up' && !c.pickedUpAt
-  ).length;
+  return { state: s, sentIds, remaining, events };
+}
 
-  const verifiedCount = cases.filter((c) => c.locationVerified).length;
-  const digitalVerifyMinutes = verifiedCount > 0 ? 6 : 9;
-  const reduction = Math.max(
-    0,
-    Math.round(((baseline.paperVerifyMinutes - digitalVerifyMinutes) / baseline.paperVerifyMinutes) * 100)
-  );
+/** Real state with the still-valid queued items applied in order. Used only for offline checks, never displayed. */
+export function projectQueuedState(state: QueueState, drafts: LocalDraftAction[]): QueueState {
+  return applyQueuedActions(state, drafts, { at: '', atMs: 0 }).state;
+}
 
-  void boats.length;
+/** Case ids and boat ids referenced by queued items, for "Waiting to send" badges. */
+export function getQueuedTargets(drafts: LocalDraftAction[]): {
+  caseIds: Set<string>;
+  boatIds: Set<string>;
+} {
+  const caseIds = new Set<string>();
+  const boatIds = new Set<string>();
+  for (const item of drafts) {
+    const p = item.payload as Record<string, unknown>;
+    if (item.payloadType === 'new_case') {
+      const id = (p.rescueCase as RescueCase | undefined)?.id;
+      if (id) caseIds.add(id);
+    }
+    if (typeof p.caseId === 'string') caseIds.add(p.caseId);
+    if (typeof p.boatId === 'string') boatIds.add(p.boatId);
+  }
+  return { caseIds, boatIds };
+}
+
+export interface DrillComparisonResult {
+  paperVerifyMinutes: number;
+  /** Mean report-to-verification time over requests created and verified in this session; null when none. */
+  digitalVerify: { minutes: number; requestsMeasured: number } | null;
+  /** Digital vs paper verification time; null when digitalVerify is null. */
+  headline: { direction: 'faster' | 'slower' | 'same'; percent: number } | null;
+  paperDuplicateAssignments: number;
+  /** Duplicate or second-destination assignments blocked, out of all recorded assignment attempts. */
+  digitalAssignments: { blocked: number; attempts: number } | null;
+  paperFalseRescuedCount: number;
+  /** Pickups blocked (boat not assigned or not arrived), out of all recorded pickup attempts. */
+  digitalPickups: { blocked: number; attempts: number } | null;
+}
+
+/**
+ * Drill measures from recorded data only. Seeded cases have no epoch fields, so they are
+ * never measured; counts come from the session event log.
+ */
+export function computeDrillComparison(
+  cases: RescueCase[],
+  events: DrillEvent[],
+  baseline: DrillBaseline
+): DrillComparisonResult {
+  const intervalsMs: number[] = [];
+  for (const c of cases) {
+    if (
+      typeof c.reportedAtMs === 'number' &&
+      typeof c.verifiedAtMs === 'number' &&
+      Number.isFinite(c.reportedAtMs) &&
+      Number.isFinite(c.verifiedAtMs) &&
+      c.verifiedAtMs >= c.reportedAtMs
+    ) {
+      intervalsMs.push(c.verifiedAtMs - c.reportedAtMs);
+    }
+  }
+
+  let digitalVerify: DrillComparisonResult['digitalVerify'] = null;
+  let headline: DrillComparisonResult['headline'] = null;
+  if (intervalsMs.length > 0) {
+    const meanMinutes = intervalsMs.reduce((sum, ms) => sum + ms, 0) / intervalsMs.length / 60000;
+    const minutes = Math.round(meanMinutes * 10) / 10;
+    digitalVerify = { minutes, requestsMeasured: intervalsMs.length };
+
+    const paper = baseline.paperVerifyMinutes;
+    const percent = paper > 0 ? Math.round((Math.abs(paper - minutes) / paper) * 100) : 0;
+    const direction = percent === 0 ? 'same' : minutes < paper ? 'faster' : 'slower';
+    headline = { direction, percent };
+  }
+
+  const assignmentEvents = events.filter((e) => e.kind.startsWith('assignment_'));
+  const digitalAssignments =
+    assignmentEvents.length > 0
+      ? {
+          blocked: assignmentEvents.filter(
+            (e) =>
+              e.kind === 'assignment_blocked_duplicate' ||
+              e.kind === 'assignment_blocked_second_destination'
+          ).length,
+          attempts: assignmentEvents.length,
+        }
+      : null;
+
+  const pickupEvents = events.filter((e) => e.kind.startsWith('pickup_'));
+  const digitalPickups =
+    pickupEvents.length > 0
+      ? {
+          blocked: pickupEvents.filter(
+            (e) =>
+              e.kind === 'pickup_rejected_not_assigned' || e.kind === 'pickup_rejected_not_arrived'
+          ).length,
+          attempts: pickupEvents.length,
+        }
+      : null;
 
   return {
     paperVerifyMinutes: baseline.paperVerifyMinutes,
-    digitalVerifyMinutes,
-    verifyTimeReductionPct: reduction,
+    digitalVerify,
+    headline,
     paperDuplicateAssignments: baseline.paperDuplicateAssignments,
-    digitalDuplicateAssignments: digitalDuplicates,
+    digitalAssignments,
     paperFalseRescuedCount: baseline.paperFalseRescuedCount,
-    digitalFalseRescuedCount: falseRescued,
+    digitalPickups,
   };
 }
 

@@ -27,6 +27,7 @@ import {
   UrgencyLevel,
 } from '../types/rescue';
 import { formatBoatStatus, formatCaseStatus, TRANSLATIONS } from '../i18n/translations';
+import type { ActionOutcome, PickupEligibility } from '../utils/rescueLogic';
 
 interface CoordinatorConsoleProps {
   account: DemoAccountId;
@@ -57,7 +58,8 @@ interface CoordinatorConsoleProps {
     supplies: BoatUnit['supplies'],
     eta: string
   ) => void;
-  onConfirmPersonPickedUp: (caseId: string, boatId: string) => void;
+  onConfirmPersonPickedUp: (caseId: string, boatId: string) => ActionOutcome;
+  getPickupEligibility: (caseId: string) => PickupEligibility;
   onUpdatePps: (
     ppsId: string,
     occupancy: number,
@@ -69,7 +71,16 @@ interface CoordinatorConsoleProps {
     cause: string,
     etr: string
   ) => void;
+  /** Case ids with an action in the offline queue ("Waiting to send"). */
+  queuedCaseIds?: Set<string>;
+  /** Boat ids with an action in the offline queue ("Waiting to send"). */
+  queuedBoatIds?: Set<string>;
 }
+
+const EMPTY_ID_SET: Set<string> = new Set<string>();
+
+const OFFLINE_CONSOLE_BANNER =
+  'Offline: verify pin, assign boat, priority, owner, family updates, boat location, supplies, shelters and outages need a connection. Boat status and pickup confirmations are kept as Waiting to send.';
 
 type CaseFilter = 'all' | 'needs_verification' | 'ready_for_boat' | 'en_route' | 'picked_up';
 
@@ -94,13 +105,25 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
   onUpdateBoatLocation,
   onUpdateBoatResources,
   onConfirmPersonPickedUp,
+  getPickupEligibility,
   onUpdatePps,
   onUpdateOutage,
+  queuedCaseIds = EMPTY_ID_SET,
+  queuedBoatIds = EMPTY_ID_SET,
 }) => {
   const t = TRANSLATIONS[lang];
+  // Desk-only controls need the shared system, so they are disabled while offline.
+  const deskOffline = !isOnline;
+  const deskOfflineTitle = deskOffline ? t.needsConnectionMsg : undefined;
   const [filter, setFilter] = useState<CaseFilter>('all');
-  const [dispatchBoatChoice, setDispatchBoatChoice] = useState<string>('boat-12');
+  const [dispatchBoatChoice, setDispatchBoatChoice] = useState<string>(
+    () =>
+      boats.find((b) => b.status === 'available' && !b.assignedPickupPoint)?.id ??
+      boats[0]?.id ??
+      ''
+  );
   const [dispatchFeedback, setDispatchFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [pickupBoatChoice, setPickupBoatChoice] = useState<string>('');
   const [pinLandmarkDraft, setPinLandmarkDraft] = useState<string>('');
   const [pinConfirmerDraft, setPinConfirmerDraft] = useState<string>('');
   const [ownerDraft, setOwnerDraft] = useState<string>('Volunteer Scout Unit B');
@@ -122,6 +145,15 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
   }, [cases, filter]);
 
   const activeCase = cases.find((c) => c.id === selectedCaseId) ?? filteredCases[0] ?? cases[0];
+
+  // Only assigned boats marked 'arrived' may confirm a pickup. The selected boat falls back to
+  // the first arrived boat when the stored choice is not eligible for the active case.
+  const pickupEligibility: PickupEligibility = activeCase
+    ? getPickupEligibility(activeCase.id)
+    : { arrivedBoats: [], blocker: null };
+  const pickupBoats = pickupEligibility.arrivedBoats;
+  const selectedPickupBoat =
+    pickupBoats.find((b) => b.id === pickupBoatChoice) ?? pickupBoats[0];
 
   const statusBadgeText = (status: RescueCase['status']) => formatCaseStatus(lang, status);
 
@@ -152,6 +184,15 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
 
   return (
     <div className="space-y-6">
+      {deskOffline && (
+        <div
+          role="status"
+          className="px-4 py-3 bg-amber-50 border border-amber-300 rounded-lg text-xs font-medium text-amber-950"
+        >
+          {OFFLINE_CONSOLE_BANNER}
+        </div>
+      )}
+
       {/* Section 1: Triage, Priority Facts, Pin Verification & Dispatch */}
       <section
         aria-label={t.adminConsoleTitle}
@@ -256,9 +297,9 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                         Assistance: {c.okuNeeds.join(' · ')}
                       </div>
                     )}
-                    {c.syncState === 'local_draft' && (
+                    {(queuedCaseIds.has(c.id) || c.syncState === 'local_draft') && (
                       <div className="text-xs text-amber-800 font-semibold mt-1">
-                        Local draft (not sent)
+                        {t.waitingToSendLabel}
                       </div>
                     )}
                   </button>
@@ -380,8 +421,10 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                       <select
                         aria-label="Confirm case priority level"
                         value={priorityDraft}
+                        disabled={deskOffline}
+                        title={deskOfflineTitle}
                         onChange={(e) => setPriorityDraft(e.target.value as UrgencyLevel)}
-                        className="min-h-[36px] text-xs px-2.5 py-1 bg-white border border-slate-300 rounded"
+                        className="min-h-[36px] text-xs px-2.5 py-1 bg-white border border-slate-300 rounded disabled:opacity-45 disabled:cursor-not-allowed"
                       >
                         <option value="critical">Urgent (Critical)</option>
                         <option value="high">High</option>
@@ -391,12 +434,16 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                         type="text"
                         aria-label="Priority confirmation reason"
                         value={priorityReasonDraft}
+                        disabled={deskOffline}
+                        title={deskOfflineTitle}
                         onChange={(e) => setPriorityReasonDraft(e.target.value)}
                         placeholder={t.priorityReasonPlaceholder}
-                        className="flex-1 min-w-[180px] min-h-[36px] text-xs px-2.5 py-1 bg-white border border-slate-300 rounded"
+                        className="flex-1 min-w-[180px] min-h-[36px] text-xs px-2.5 py-1 bg-white border border-slate-300 rounded disabled:opacity-45 disabled:cursor-not-allowed"
                       />
                       <button
                         type="button"
+                        disabled={deskOffline}
+                        title={deskOfflineTitle}
                         onClick={() => {
                           onConfirmPriority(
                             activeCase.id,
@@ -408,7 +455,7 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                             msg: `Priority confirmed as ${priorityDraft === 'critical' ? 'Urgent' : priorityDraft}.`,
                           });
                         }}
-                        className="min-h-[36px] px-3 py-1 text-xs font-semibold text-white bg-[#0F4C81] hover:bg-sky-900 rounded cursor-pointer whitespace-nowrap"
+                        className="min-h-[36px] px-3 py-1 text-xs font-semibold text-white bg-[#0F4C81] hover:bg-sky-900 rounded cursor-pointer whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-[#0F4C81]"
                       >
                         {t.confirmPriorityBtn}
                       </button>
@@ -435,22 +482,28 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                       type="text"
                       aria-label="Pickup landmark name"
                       value={pinLandmarkDraft || activeCase.pickupLandmark}
+                      disabled={deskOffline}
+                      title={deskOfflineTitle}
                       onChange={(e) => setPinLandmarkDraft(e.target.value)}
                       placeholder="Specific pickup point (e.g. school entrance)"
-                      className="text-xs px-2.5 py-2 bg-white border border-slate-300 rounded-md"
+                      className="text-xs px-2.5 py-2 bg-white border border-slate-300 rounded-md disabled:opacity-45 disabled:cursor-not-allowed"
                     />
                     <input
                       type="text"
                       aria-label="Confirmed by who"
                       value={pinConfirmerDraft}
+                      disabled={deskOffline}
+                      title={deskOfflineTitle}
                       onChange={(e) => setPinConfirmerDraft(e.target.value)}
                       placeholder="Who confirmed? (e.g. Neighbour phone)"
-                      className="text-xs px-2.5 py-2 bg-white border border-slate-300 rounded-md"
+                      className="text-xs px-2.5 py-2 bg-white border border-slate-300 rounded-md disabled:opacity-45 disabled:cursor-not-allowed"
                     />
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
+                      disabled={deskOffline}
+                      title={deskOfflineTitle}
                       onClick={() => {
                         const landmark = (pinLandmarkDraft || activeCase.pickupLandmark).replace(
                           /^Unconfirmed —\s*/i,
@@ -467,7 +520,7 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                           msg: `Pickup pin verified at "${landmark}".`,
                         });
                       }}
-                      className="min-h-[40px] px-3.5 py-1.5 text-xs font-medium text-white bg-emerald-800 hover:bg-emerald-900 rounded-md whitespace-nowrap cursor-pointer"
+                      className="min-h-[40px] px-3.5 py-1.5 text-xs font-medium text-white bg-emerald-800 hover:bg-emerald-900 rounded-md whitespace-nowrap cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-emerald-800"
                     >
                       Verify / Update Pickup Pin{tappedLocation ? ' (Use Tapped Map Pin)' : ''}
                     </button>
@@ -485,20 +538,26 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                         type="text"
                         aria-label="Case owner"
                         value={ownerDraft}
+                        disabled={deskOffline}
+                        title={deskOfflineTitle}
                         onChange={(e) => setOwnerDraft(e.target.value)}
                         placeholder="Owner (e.g. Scout Unit B)"
-                        className="text-xs px-2.5 py-1.5 bg-white border border-slate-300 rounded-md"
+                        className="text-xs px-2.5 py-1.5 bg-white border border-slate-300 rounded-md disabled:opacity-45 disabled:cursor-not-allowed"
                       />
                       <input
                         type="text"
                         aria-label="Follow-up action"
                         value={followUpDraft}
+                        disabled={deskOffline}
+                        title={deskOfflineTitle}
                         onChange={(e) => setFollowUpDraft(e.target.value)}
                         placeholder="Follow-up action"
-                        className="text-xs px-2.5 py-1.5 bg-white border border-slate-300 rounded-md"
+                        className="text-xs px-2.5 py-1.5 bg-white border border-slate-300 rounded-md disabled:opacity-45 disabled:cursor-not-allowed"
                       />
                       <button
                         type="button"
+                        disabled={deskOffline}
+                        title={deskOfflineTitle}
                         onClick={() => {
                           onAssignOwnerAndFollowUp(
                             activeCase.id,
@@ -510,7 +569,7 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                             msg: `Assigned owner "${ownerDraft}" with follow-up action.`,
                           });
                         }}
-                        className="min-h-[40px] px-3 py-1.5 text-xs font-medium text-amber-950 bg-amber-50 border border-amber-400 hover:bg-amber-100 rounded-md whitespace-nowrap cursor-pointer"
+                        className="min-h-[40px] px-3 py-1.5 text-xs font-medium text-amber-950 bg-amber-50 border border-amber-400 hover:bg-amber-100 rounded-md whitespace-nowrap cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-amber-50"
                       >
                         Set Owner &amp; Follow-Up
                       </button>
@@ -533,8 +592,10 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                       <select
                         id="assign-boat-select"
                         value={dispatchBoatChoice}
+                        disabled={deskOffline}
+                        title={deskOfflineTitle}
                         onChange={(e) => setDispatchBoatChoice(e.target.value)}
-                        className="flex-1 min-w-[200px] min-h-[42px] text-xs px-2.5 py-2 bg-white border border-slate-300 rounded-md"
+                        className="flex-1 min-w-[200px] min-h-[42px] text-xs px-2.5 py-2 bg-white border border-slate-300 rounded-md disabled:opacity-45 disabled:cursor-not-allowed"
                       >
                         {boats.map((b) => (
                           <option key={b.id} value={b.id}>
@@ -545,6 +606,8 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                       </select>
                       <button
                         type="button"
+                        disabled={deskOffline}
+                        title={deskOfflineTitle}
                         onClick={() => {
                           const res = onAssignBoat(activeCase.id, dispatchBoatChoice);
                           setDispatchFeedback({
@@ -556,7 +619,7 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                               : res.error ?? 'Could not assign boat.',
                           });
                         }}
-                        className="min-h-[42px] px-4 py-2 text-xs font-semibold text-white bg-[#0F4C81] hover:bg-sky-900 rounded-md whitespace-nowrap cursor-pointer"
+                        className="min-h-[42px] px-4 py-2 text-xs font-semibold text-white bg-[#0F4C81] hover:bg-sky-900 rounded-md whitespace-nowrap cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-[#0F4C81]"
                       >
                         {t.assignBtn}
                       </button>
@@ -567,26 +630,55 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                 {/* Separate "Person Picked Up" Confirmation Action */}
                 {(activeCase.status === 'assigned' || activeCase.status === 'boat_arrived') && (
                   <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-md flex flex-wrap items-center justify-between gap-3">
-                    <div className="text-xs text-slate-700">
-                      <strong>Confirm boarding individually:</strong> Confirming this person picked up leaves any other waiting households at the same entrance open.
+                    <div className="text-xs text-slate-700 space-y-1">
+                      <p>
+                        <strong>Confirm boarding individually:</strong> Confirming this person picked up leaves any other waiting households at the same entrance open.
+                      </p>
+                      {pickupEligibility.blocker && (
+                        <p role="status" className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-2.5 py-1.5">
+                          {pickupEligibility.blocker}
+                        </p>
+                      )}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const boatId = activeCase.assignedBoatIds[0] ?? boats[0].id;
-                        onConfirmPersonPickedUp(activeCase.id, boatId);
-                        setDispatchFeedback({
-                          ok: true,
-                          msg: isOnline
-                            ? `Person picked up confirmed for ${activeCase.affectedPersonName}.`
-                            : 'Pickup confirmation saved as local draft (offline).',
-                        });
-                      }}
-                      className="min-h-[44px] px-4 py-2 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-900 rounded-md inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
-                    >
-                      <UserCheck className="w-4 h-4" />
-                      <span>{t.personPickedUpBtn}</span>
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {pickupBoats.length > 1 && (
+                        <select
+                          aria-label="Arrived boat that picked up this person"
+                          value={selectedPickupBoat?.id ?? ''}
+                          onChange={(e) => setPickupBoatChoice(e.target.value)}
+                          className="min-w-[180px] min-h-[44px] text-xs px-2.5 py-2 bg-white border border-slate-300 rounded-md"
+                        >
+                          {pickupBoats.map((b) => (
+                            <option key={b.id} value={b.id}>
+                              {b.name} ({b.crewLead})
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      <button
+                        type="button"
+                        disabled={!selectedPickupBoat}
+                        onClick={() => {
+                          if (!selectedPickupBoat) return;
+                          const res = onConfirmPersonPickedUp(activeCase.id, selectedPickupBoat.id);
+                          setDispatchFeedback({
+                            ok: res.ok,
+                            msg: !res.ok
+                              ? res.error ?? 'Pickup could not be confirmed.'
+                              : res.queued
+                                ? 'Pickup confirmation waiting to send.'
+                                : `Person picked up confirmed for ${activeCase.affectedPersonName} by ${selectedPickupBoat.name}.`,
+                          });
+                        }}
+                        className="min-h-[44px] px-4 py-2 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-900 rounded-md inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-emerald-800"
+                      >
+                        <UserCheck className="w-4 h-4" />
+                        <span>
+                          {t.personPickedUpBtn}
+                          {pickupBoats.length === 1 ? ` (${pickupBoats[0].name})` : ''}
+                        </span>
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -611,12 +703,16 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                       id="send-family-msg"
                       type="text"
                       value={familyMsgDraft}
+                      disabled={deskOffline}
+                      title={deskOfflineTitle}
                       onChange={(e) => setFamilyMsgDraft(e.target.value)}
                       placeholder="e.g. Wheelchair ramp crew is 10 mins from school entrance."
-                      className="flex-1 min-w-[200px] text-xs px-3 py-2 border border-slate-300 rounded-md"
+                      className="flex-1 min-w-[200px] text-xs px-3 py-2 border border-slate-300 rounded-md disabled:opacity-45 disabled:cursor-not-allowed"
                     />
                     <button
                       type="button"
+                      disabled={deskOffline}
+                      title={deskOfflineTitle}
                       onClick={() => {
                         if (!familyMsgDraft.trim()) return;
                         onSendFamilyUpdate(activeCase.id, familyMsgDraft.trim());
@@ -626,7 +722,7 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                           msg: 'Update sent to reporting family feed.',
                         });
                       }}
-                      className="min-h-[40px] px-3.5 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-md inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                      className="min-h-[40px] px-3.5 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-md inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-slate-900"
                     >
                       <Send className="w-3.5 h-3.5" />
                       <span>Send Update</span>
@@ -684,9 +780,16 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                         <span>{boat.name}</span>
                       </h3>
                     </div>
-                    <span className="text-xs font-mono tabular-nums text-slate-700">
-                      {boat.lastUpdatedAt}
-                    </span>
+                    <div className="flex flex-col items-end gap-1">
+                      <span className="text-xs font-mono tabular-nums text-slate-700">
+                        {boat.lastUpdatedAt}
+                      </span>
+                      {queuedBoatIds.has(boat.id) && (
+                        <span className="text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">
+                          {t.waitingToSendLabel}
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   <div className="text-xs text-slate-700 space-y-1">
@@ -711,6 +814,8 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                       <input
                         type="number"
                         min={0}
+                        disabled={deskOffline}
+                        title={deskOfflineTitle}
                         aria-label={`${boat.name} life jackets`}
                         value={boat.supplies.lifeJackets}
                         onChange={(e) =>
@@ -720,7 +825,7 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                             etaValue
                           )
                         }
-                        className="w-full px-2 py-1 border border-slate-300 rounded font-mono tabular-nums"
+                        className="w-full px-2 py-1 border border-slate-300 rounded font-mono tabular-nums disabled:opacity-45 disabled:cursor-not-allowed"
                       />
                     </div>
                     <div>
@@ -728,6 +833,8 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                       <input
                         type="number"
                         min={0}
+                        disabled={deskOffline}
+                        title={deskOfflineTitle}
                         aria-label={`${boat.name} generators`}
                         value={boat.supplies.generators}
                         onChange={(e) =>
@@ -737,7 +844,7 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                             etaValue
                           )
                         }
-                        className="w-full px-2 py-1 border border-slate-300 rounded font-mono tabular-nums"
+                        className="w-full px-2 py-1 border border-slate-300 rounded font-mono tabular-nums disabled:opacity-45 disabled:cursor-not-allowed"
                       />
                     </div>
                     <div>
@@ -747,6 +854,8 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                       <input
                         type="number"
                         min={0}
+                        disabled={deskOffline}
+                        title={deskOfflineTitle}
                         aria-label={`${boat.name} drinking water cases`}
                         value={boat.supplies.drinkingWaterCases}
                         onChange={(e) =>
@@ -759,7 +868,7 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                             etaValue
                           )
                         }
-                        className="w-full px-2 py-1 border border-slate-300 rounded font-mono tabular-nums"
+                        className="w-full px-2 py-1 border border-slate-300 rounded font-mono tabular-nums disabled:opacity-45 disabled:cursor-not-allowed"
                       />
                     </div>
                   </div>
@@ -777,8 +886,10 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                     />
                     <button
                       type="button"
+                      disabled={deskOffline}
+                      title={deskOfflineTitle}
                       onClick={() => onUpdateBoatResources(boat.id, boat.supplies, etaValue)}
-                      className="px-2.5 py-1.5 text-xs font-medium border border-slate-300 rounded hover:bg-slate-50 cursor-pointer"
+                      className="px-2.5 py-1.5 text-xs font-medium border border-slate-300 rounded hover:bg-slate-50 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                     >
                       Save ETA
                     </button>
@@ -829,8 +940,10 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                   {tappedLocation && (
                     <button
                       type="button"
+                      disabled={deskOffline}
+                      title={deskOfflineTitle}
                       onClick={() => onUpdateBoatLocation(boat.id, tappedLocation)}
-                      className="w-full min-h-[36px] px-2.5 py-1 text-xs font-medium rounded border border-sky-300 bg-sky-50 text-sky-900 hover:bg-sky-100 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                      className="w-full min-h-[36px] px-2.5 py-1 text-xs font-medium rounded border border-sky-300 bg-sky-50 text-sky-900 hover:bg-sky-100 inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-sky-50"
                     >
                       <Crosshair className="w-3.5 h-3.5" />
                       <span>
@@ -869,15 +982,19 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
+                    disabled={deskOffline}
+                    title={deskOfflineTitle}
                     onClick={() =>
                       onUpdatePps(pps.id, Math.min(pps.capacity, pps.occupancy + 5), 'Open')
                     }
-                    className="min-h-[36px] px-2.5 py-1 text-xs font-medium border border-slate-300 rounded hover:bg-slate-50 cursor-pointer"
+                    className="min-h-[36px] px-2.5 py-1 text-xs font-medium border border-slate-300 rounded hover:bg-slate-50 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                   >
                     +5 Intake
                   </button>
                   <button
                     type="button"
+                    disabled={deskOffline}
+                    title={deskOfflineTitle}
                     onClick={() =>
                       onUpdatePps(
                         pps.id,
@@ -885,7 +1002,7 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                         pps.status === 'Open' ? 'Near Capacity' : 'Open'
                       )
                     }
-                    className="min-h-[36px] px-2.5 py-1 text-xs font-medium border border-slate-300 rounded hover:bg-slate-50 cursor-pointer"
+                    className="min-h-[36px] px-2.5 py-1 text-xs font-medium border border-slate-300 rounded hover:bg-slate-50 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                   >
                     Toggle Status
                   </button>
@@ -919,13 +1036,17 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                       type="text"
                       aria-label={`ETR for ${zone.areaName}`}
                       value={etrVal}
+                      disabled={deskOffline}
+                      title={deskOfflineTitle}
                       onChange={(e) =>
                         setOutageEtrDrafts((prev) => ({ ...prev, [zone.id]: e.target.value }))
                       }
-                      className="flex-1 min-w-[160px] px-2.5 py-1.5 border border-slate-300 rounded text-xs"
+                      className="flex-1 min-w-[160px] px-2.5 py-1.5 border border-slate-300 rounded text-xs disabled:opacity-45 disabled:cursor-not-allowed"
                     />
                     <button
                       type="button"
+                      disabled={deskOffline}
+                      title={deskOfflineTitle}
                       onClick={() =>
                         onUpdateOutage(
                           zone.id,
@@ -934,12 +1055,14 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                           etrVal || 'Not yet confirmed'
                         )
                       }
-                      className="min-h-[36px] px-2.5 py-1 text-xs font-medium border border-slate-300 rounded hover:bg-slate-50 cursor-pointer"
+                      className="min-h-[36px] px-2.5 py-1 text-xs font-medium border border-slate-300 rounded hover:bg-slate-50 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                     >
                       Update ETR
                     </button>
                     <button
                       type="button"
+                      disabled={deskOffline}
+                      title={deskOfflineTitle}
                       onClick={() =>
                         onUpdateOutage(
                           zone.id,
@@ -948,7 +1071,7 @@ export const CoordinatorConsole: React.FC<CoordinatorConsoleProps> = ({
                           'Power restored (Demo)'
                         )
                       }
-                      className="min-h-[36px] px-2.5 py-1 text-xs font-medium bg-emerald-800 text-white rounded hover:bg-emerald-900 cursor-pointer"
+                      className="min-h-[36px] px-2.5 py-1 text-xs font-medium bg-emerald-800 text-white rounded hover:bg-emerald-900 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-emerald-800"
                     >
                       Mark Restored
                     </button>

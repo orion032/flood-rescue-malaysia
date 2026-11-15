@@ -697,7 +697,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                 type="submit"
                 className="min-h-[44px] px-4 py-2 text-xs font-semibold text-white bg-[#0F4C81] hover:bg-sky-900 rounded-md cursor-pointer"
               >
-                {isOnline ? t.requestRescueBtn : 'Save Local Draft (Offline)'}
+                {isOnline ? t.requestRescueBtn : t.saveWaitingBtn}
               </button>
           </div>
         </form>

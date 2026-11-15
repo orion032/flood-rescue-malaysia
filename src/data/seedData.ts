@@ -662,6 +662,25 @@ export const INITIAL_BOATS: BoatUnit[] = [
     savedAssignmentNote:
       'Proceeding along Seksyen 17 drainage canal to Seksyen 17 Terminal Jetty for Puan Salma.',
   },
+  {
+    id: 'boat-15',
+    name: 'Boat 15',
+    crewLead: 'En. Rizal Kamarudin (Demo Crew)',
+    crewCount: 3,
+    status: 'available',
+    assignedPickupPoint: null,
+    assignedCaseIds: [],
+    position: { lat: 3.0362, lng: 101.5404 },
+    lastUpdatedAt: '2:36 PM',
+    capacityPax: 6,
+    supplies: {
+      lifeJackets: 8,
+      generators: 0,
+      drinkingWaterCases: 4,
+      wheelchairRamp: false,
+    },
+    savedAssignmentNote: 'Waiting at Dewan Seksyen 25 staging jetty. No assignment yet.',
+  },
 ];
 
 export const INITIAL_SUPPLY_DEPOTS: SupplyDepot[] = [
@@ -939,7 +958,7 @@ export const INITIAL_CASES: RescueCase[] = [
     verifiedBy: 'Coordinator Amir (Demo)',
     verifiedAt: '2:31 PM',
     caseOwner: 'Coordinator Amir',
-    followUpAction: 'Assign next available boat when Boat 04/07/12 completes school pickup',
+    followUpAction: 'Assign Boat 15 from the Seksyen 25 staging jetty',
     status: 'confirmed',
     urgency: 'high',
     priorityConfirmed: true,

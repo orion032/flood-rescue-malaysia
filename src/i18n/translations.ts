@@ -15,8 +15,13 @@ export interface TranslationDict {
   allPlacesOption: string;
   onlineBtn: string;
   offlineBtn: string;
-  sendDraftsBtn: (n: number) => string;
-  localDraftsBtn: (n: number) => string;
+  waitingToSendLabel: string;
+  waitingToSendCount: (n: number) => string;
+  sendQueuedBtn: (n: number) => string;
+  saveWaitingBtn: string;
+  notSentLabel: string;
+  needsConnectionMsg: string;
+  browserOfflineNote: string;
   resetDemoBtn: string;
   demoNoticeText: string;
   demoEmergencyNote: string;
@@ -141,8 +146,13 @@ export const TRANSLATIONS: Record<LanguageCode, TranslationDict> = {
     allPlacesOption: 'All Shah Alam places',
     onlineBtn: 'Online · Test Offline',
     offlineBtn: 'Offline · Go Online',
-    sendDraftsBtn: (n) => `Send ${n} Saved Draft(s)`,
-    localDraftsBtn: (n) => `${n} Draft(s) Saved Locally`,
+    waitingToSendLabel: 'Waiting to send',
+    waitingToSendCount: (n) => `${n} waiting to send`,
+    sendQueuedBtn: (n) => `Send ${n} waiting item(s)`,
+    saveWaitingBtn: 'Save · Waiting to send',
+    notSentLabel: 'Not sent',
+    needsConnectionMsg: 'Needs a connection. Not saved while offline.',
+    browserOfflineNote: 'No network connection detected.',
     resetDemoBtn: 'Reset',
     demoNoticeText:
       'Local demo (Shah Alam): Fictional data for testing. Real apps must also protect private data on the server.',
@@ -174,7 +184,7 @@ export const TRANSLATIONS: Record<LanguageCode, TranslationDict> = {
     layerSupplies: 'Supplies',
     layerFlood: 'Flood Alerts',
     offlineMapWarning:
-      'No internet: Map tiles need internet, but your saved rescue list and drafts still work offline.',
+      'No internet: Map tiles need internet. Your saved rescue list stays readable, and new actions are kept as Waiting to send.',
     legendBoat: 'Rescue boat',
     legendShelter: 'Open shelter (PPS)',
     legendPickup: 'Pickup point',
@@ -269,8 +279,13 @@ export const TRANSLATIONS: Record<LanguageCode, TranslationDict> = {
     allPlacesOption: 'Semua lokasi Shah Alam',
     onlineBtn: 'Dalam Talian · Uji Luar Talian',
     offlineBtn: 'Luar Talian · Sambung Semula',
-    sendDraftsBtn: (n) => `Hantar ${n} Draf Disimpan`,
-    localDraftsBtn: (n) => `${n} Draf Disimpan Lokal`,
+    waitingToSendLabel: 'Menunggu untuk dihantar',
+    waitingToSendCount: (n) => `${n} menunggu untuk dihantar`,
+    sendQueuedBtn: (n) => `Hantar ${n} item yang menunggu`,
+    saveWaitingBtn: 'Simpan · Menunggu untuk dihantar',
+    notSentLabel: 'Tidak dihantar',
+    needsConnectionMsg: 'Perlu sambungan internet. Tidak disimpan semasa luar talian.',
+    browserOfflineNote: 'Tiada sambungan rangkaian dikesan.',
     resetDemoBtn: 'Set Semula',
     demoNoticeText:
       'Demo tempatan (Shah Alam): Data rekaan untuk ujian. Sistem sebenar perlu kawalan akses di pelayan.',
@@ -302,7 +317,7 @@ export const TRANSLATIONS: Record<LanguageCode, TranslationDict> = {
     layerSupplies: 'Bekalan',
     layerFlood: 'Amaran Banjir',
     offlineMapWarning:
-      'Tiada internet: Peta memerlukan internet, tetapi senarai kes dan draf anda masih boleh dibaca.',
+      'Tiada internet: Peta memerlukan internet. Senarai kes anda masih boleh dibaca, dan tindakan baharu disimpan sebagai Menunggu untuk dihantar.',
     legendBoat: 'Bot penyelamat',
     legendShelter: 'PPS dibuka',
     legendPickup: 'Titik ambil',
@@ -397,8 +412,13 @@ export const TRANSLATIONS: Record<LanguageCode, TranslationDict> = {
     allPlacesOption: '莎阿南全部地点',
     onlineBtn: '在线 · 模拟断网',
     offlineBtn: '离线 · 恢复连接',
-    sendDraftsBtn: (n) => `发送 ${n} 条本地草稿`,
-    localDraftsBtn: (n) => `已保存 ${n} 条本地草稿`,
+    waitingToSendLabel: '等待发送',
+    waitingToSendCount: (n) => `${n} 条等待发送`,
+    sendQueuedBtn: (n) => `发送 ${n} 条等待发送的项目`,
+    saveWaitingBtn: '保存 · 等待发送',
+    notSentLabel: '未发送',
+    needsConnectionMsg: '需要网络连接。离线时不会保存。',
+    browserOfflineNote: '未检测到网络连接。',
     resetDemoBtn: '重置',
     demoNoticeText:
       '本地演示（莎阿南）：所有数据均为模拟演示。真实部署时必须在服务器端验证访问权限。',
@@ -430,7 +450,7 @@ export const TRANSLATIONS: Record<LanguageCode, TranslationDict> = {
     layerSupplies: '物资仓库',
     layerFlood: '灾情与停电',
     offlineMapWarning:
-      '当前离线：地图底图需要网络加载，但已保存的求助信息与草稿仍可离线查看。',
+      '当前离线：地图底图需要网络加载。已保存的求助信息仍可查看，新的操作将显示为等待发送。',
     legendBoat: '救援船只',
     legendShelter: '开放救灾中心 (PPS)',
     legendPickup: '接送点',

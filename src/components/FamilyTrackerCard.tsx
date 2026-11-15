@@ -12,7 +12,14 @@ import {
   Users,
   WifiOff,
 } from 'lucide-react';
-import { BoatUnit, DemoAccountId, GeoPoint, LanguageCode, RescueCase } from '../types/rescue';
+import {
+  BoatUnit,
+  DemoAccountId,
+  GeoPoint,
+  LanguageCode,
+  LocalDraftAction,
+  RescueCase,
+} from '../types/rescue';
 import {
   formatFamilyMemberStatus,
   getOwnedCasesForAccount,
@@ -43,7 +50,48 @@ interface FamilyTrackerCardProps {
   ) => void;
   onRequestRescue: () => void;
   onSwitchAccount: (account: DemoAccountId) => void;
+  /** Queued items from this person (not the coordinator) that have not been sent yet. */
+  waitingItems?: LocalDraftAction[];
+  /** Case ids that have at least one queued item waiting to send. */
+  queuedCaseIds?: Set<string>;
 }
+
+const EMPTY_WAITING_ITEMS: LocalDraftAction[] = [];
+const EMPTY_CASE_IDS: Set<string> = new Set();
+
+interface WaitingToSendListProps {
+  items: LocalDraftAction[];
+  t: (typeof TRANSLATIONS)[LanguageCode];
+}
+
+const WaitingToSendList: React.FC<WaitingToSendListProps> = ({ items, t }) => {
+  if (items.length === 0) return null;
+  return (
+    <div
+      role="status"
+      aria-label={t.waitingToSendLabel}
+      className="p-3 rounded-md bg-amber-50 border border-amber-200 space-y-1.5"
+    >
+      <div className="text-xs font-semibold text-amber-900 flex items-center gap-1.5">
+        <Clock className="w-3.5 h-3.5" />
+        <span>{t.waitingToSendCount(items.length)}</span>
+      </div>
+      <ul className="space-y-1">
+        {items.map((item) => (
+          <li key={item.id} className="text-xs text-slate-800">
+            <span className="font-mono tabular-nums text-slate-500">{item.createdAt}</span>{' '}
+            <span>{item.summary}</span>
+            {item.error && (
+              <span className="block text-red-800 font-medium">
+                {`${t.notSentLabel}: ${item.error}`}
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
 
 export const FamilyTrackerCard: React.FC<FamilyTrackerCardProps> = ({
   account,
@@ -58,6 +106,8 @@ export const FamilyTrackerCard: React.FC<FamilyTrackerCardProps> = ({
   onReportLocationChange,
   onRequestRescue,
   onSwitchAccount,
+  waitingItems = EMPTY_WAITING_ITEMS,
+  queuedCaseIds = EMPTY_CASE_IDS,
 }) => {
   const t = TRANSLATIONS[lang];
   const [editingLocation, setEditingLocation] = useState(false);
@@ -108,6 +158,7 @@ export const FamilyTrackerCard: React.FC<FamilyTrackerCardProps> = ({
       >
         <h2 className="text-base font-semibold text-slate-900">{t.myRescueTitle}</h2>
         <p className="text-sm text-slate-600">{t.noActiveRescue}</p>
+        <WaitingToSendList items={waitingItems} t={t} />
         <button
           type="button"
           onClick={onRequestRescue}
@@ -150,7 +201,7 @@ export const FamilyTrackerCard: React.FC<FamilyTrackerCardProps> = ({
     setFeedbackMsg(
       isOnline
         ? `Updated pickup spot to "${newLandmark.trim()}".`
-        : 'Saved offline as a local draft.'
+        : `${newLandmark.trim()} · ${t.waitingToSendLabel}`
     );
     setNewLandmark('');
     setConfirmedBy('');
@@ -219,8 +270,8 @@ export const FamilyTrackerCard: React.FC<FamilyTrackerCardProps> = ({
               {activeCase.okuNeeds.length > 0
                 ? activeCase.okuNeeds.join(' · ')
                 : 'Standard boat boarding'}
-              {activeCase.syncState === 'local_draft' && (
-                <span className="text-amber-800 font-semibold"> · Local draft</span>
+              {(queuedCaseIds.has(activeCase.id) || activeCase.syncState === 'local_draft') && (
+                <span className="text-amber-800 font-semibold"> · {t.waitingToSendLabel}</span>
               )}
             </div>
           </div>
@@ -251,6 +302,8 @@ export const FamilyTrackerCard: React.FC<FamilyTrackerCardProps> = ({
           {feedbackMsg}
         </div>
       )}
+
+      <WaitingToSendList items={waitingItems} t={t} />
 
       {editingLocation && (
         <form
@@ -308,7 +361,7 @@ export const FamilyTrackerCard: React.FC<FamilyTrackerCardProps> = ({
               className="min-h-[44px] px-4 py-2 text-xs font-medium text-white bg-[#0F4C81] hover:bg-sky-900 rounded-md inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
             >
               <Send className="w-3.5 h-3.5" />
-              <span>{isOnline ? 'Save update' : 'Save draft'}</span>
+              <span>{isOnline ? 'Save update' : t.saveWaitingBtn}</span>
             </button>
           </div>
         </form>
