@@ -105,7 +105,12 @@ interface CommandCentrePanelProps {
   ) => void;
   onShowIncidentOnMap: (incident: CommandIncident) => void;
   onShowRouteOnMap: (routeId: string) => void;
+  /** Command Centre writes need the shared system; they are blocked while offline. Defaults to online. */
+  isOnline?: boolean;
 }
+
+const OFFLINE_COMMAND_BANNER =
+  'Offline: Command Centre changes need a connection.';
 
 const TASK_STAGES: { id: TaskStage; label: string }[] = [
   { id: 'assigned', label: 'Assigned' },
@@ -140,7 +145,10 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
   onUpdatePpsStatus,
   onShowIncidentOnMap,
   onShowRouteOnMap,
+  isOnline = true,
 }) => {
+  // Write controls are disabled while offline; navigation ("Show on map", incident and action tabs) keeps working.
+  const writesOffline = !isOnline;
   const activeIncident =
     incidents.find((i) => i.id === selectedIncidentId) ?? incidents[0];
 
@@ -278,6 +286,15 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
 
   return (
     <div className="space-y-5">
+      {writesOffline && (
+        <div
+          role="status"
+          className="px-4 py-3 bg-amber-50 border border-amber-300 rounded-lg text-xs font-medium text-amber-950"
+        >
+          {OFFLINE_COMMAND_BANNER}
+        </div>
+      )}
+
       {/* Separate Official Warning Banner */}
       <section
         aria-label="Official warnings (separate from local evacuation decisions)"
@@ -442,6 +459,11 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                     </span>
                   </div>
 
+                  <fieldset
+                    disabled={writesOffline}
+                    aria-label="Procedure edits"
+                    className="min-w-0 space-y-3 disabled:opacity-60"
+                  >
                   {activeIncident.incidentType === 'flooding' && (
                     <div className="flex flex-wrap items-center gap-2">
                       <label htmlFor="flood-scenario-select" className="text-xs font-medium text-slate-700">
@@ -511,6 +533,7 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                       </button>
                     </div>
                   </div>
+                  </fieldset>
 
                   {/* Four Coordinator Actions */}
                   <div
@@ -559,6 +582,12 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                     </div>
                   )}
 
+                  {/* Action panels are write-only: disabled together while offline */}
+                  <fieldset
+                    disabled={writesOffline}
+                    aria-label="Coordinator action panel"
+                    className="min-w-0 space-y-3 disabled:opacity-60"
+                  >
                   {/* Action Panel 1: Verify report & Severity assessment */}
                   {activeAction === 'verify' && (
                     <div className="bg-slate-50 border border-slate-200 rounded-md p-3.5 space-y-3">
@@ -919,6 +948,7 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                       )}
                     </div>
                   )}
+                  </fieldset>
                 </div>
 
                 {/* Q3: Road Closures, Shelters & Verified Evacuation Route Controls */}
@@ -928,8 +958,12 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                   </span>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Road Segment Closure Control */}
-                    <div className="border border-slate-200 rounded-md p-3.5 space-y-2.5">
+                    {/* Road Segment Closure Control (write-only) */}
+                    <fieldset
+                      disabled={writesOffline}
+                      aria-label="Road segment controls"
+                      className="min-w-0 border border-slate-200 rounded-md p-3.5 space-y-2.5 disabled:opacity-60"
+                    >
                       <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-900">
                         <AlertTriangle className="w-3.5 h-3.5 text-amber-700" />
                         Road Segments (Closing auto-withdraws affected routes)
@@ -988,10 +1022,14 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                           </div>
                         ))}
                       </div>
-                    </div>
+                    </fieldset>
 
-                    {/* Shelter Status Control */}
-                    <div className="border border-slate-200 rounded-md p-3.5 space-y-2.5">
+                    {/* Shelter Status Control (write-only) */}
+                    <fieldset
+                      disabled={writesOffline}
+                      aria-label="PPS shelter controls"
+                      className="min-w-0 border border-slate-200 rounded-md p-3.5 space-y-2.5 disabled:opacity-60"
+                    >
                       <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-900">
                         <Building2 className="w-3.5 h-3.5 text-[#15803D]" />
                         PPS Shelters (Closing withdraws routes to shelter)
@@ -1042,7 +1080,7 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                           </div>
                         ))}
                       </div>
-                    </div>
+                    </fieldset>
                   </div>
 
                   {/* Verified Evacuation Routes Approval */}
@@ -1094,6 +1132,7 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                                   <label className="inline-flex items-center gap-1.5">
                                     <input
                                       type="checkbox"
+                                      disabled={writesOffline}
                                       checked={Boolean(ppsOpenChecked[route.id])}
                                       onChange={(e) =>
                                         setPpsOpenChecked((prev) => ({
@@ -1107,6 +1146,7 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                                   <label className="inline-flex items-center gap-1.5">
                                     <input
                                       type="checkbox"
+                                      disabled={writesOffline}
                                       checked={Boolean(routeChecked[route.id])}
                                       onChange={(e) =>
                                         setRouteChecked((prev) => ({
@@ -1120,7 +1160,9 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                                 </div>
                                 <button
                                   type="button"
+                                  disabled={writesOffline}
                                   onClick={() => {
+                                    if (writesOffline) return;
                                     const res = onApproveOrWithdrawRoute(
                                       route.id,
                                       'approve',
@@ -1139,7 +1181,7 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                                         : { ok: false, msg: res.error ?? 'Approval blocked.' }
                                     );
                                   }}
-                                  className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-white bg-[#6D28D9] hover:bg-purple-800 rounded-md cursor-pointer"
+                                  className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-white bg-[#6D28D9] hover:bg-purple-800 rounded-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#6D28D9]"
                                 >
                                   Approve &amp; Publish Route
                                 </button>
@@ -1148,7 +1190,9 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                               <div className="flex justify-end">
                                 <button
                                   type="button"
+                                  disabled={writesOffline}
                                   onClick={() => {
+                                    if (writesOffline) return;
                                     onApproveOrWithdrawRoute(route.id, 'withdraw', {
                                       destinationPpsOpenConfirmed: false,
                                       routeFieldCheckedConfirmed: false,
@@ -1159,7 +1203,7 @@ export const CommandCentrePanel: React.FC<CommandCentrePanelProps> = ({
                                       msg: `Withdrew "${route.title}". Residents see updated directions pending.`,
                                     });
                                   }}
-                                  className="min-h-[34px] px-3 py-1 text-xs font-medium text-slate-800 bg-white border border-slate-300 hover:bg-slate-100 rounded-md cursor-pointer"
+                                  className="min-h-[34px] px-3 py-1 text-xs font-medium text-slate-800 bg-white border border-slate-300 hover:bg-slate-100 rounded-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white"
                                 >
                                   Withdraw Route
                                 </button>

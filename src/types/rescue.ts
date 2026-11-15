@@ -100,6 +100,8 @@ export interface RescueCase {
   pickedUpAt?: string;
   pickedUpBy?: string;
   syncState: 'synced' | 'local_draft';
+  reportedAtMs?: number; // epoch ms; set only for requests created in this app
+  verifiedAtMs?: number; // epoch ms of the first in-app pin verification
 }
 
 export interface BoatSupply {
@@ -310,18 +312,26 @@ export interface AreaNotice {
   coordinates?: GeoPoint;
 }
 
+export type QueuedActionType =
+  | 'new_case'
+  | 'update_location'
+  | 'advance_boat'
+  | 'confirm_pickup'
+  | 'report_issue';
+
+/** One item in the "Waiting to send" queue. */
 export interface LocalDraftAction {
   id: string;
+  /** Display time the action was taken (used as its timestamp when sent). */
   createdAt: string;
+  /** Epoch ms the action was taken; absent on items queued before this field existed. */
+  createdAtMs?: number;
   actorRole: DemoRole;
   summary: string;
-  payloadType:
-    | 'new_case'
-    | 'update_location'
-    | 'advance_boat'
-    | 'confirm_pickup'
-    | 'report_issue';
+  payloadType: QueuedActionType;
   payload: Record<string, unknown>;
+  /** Reason the last send attempt rejected this item. */
+  error?: string;
 }
 
 export interface ShahAlamPlace {
@@ -336,4 +346,21 @@ export interface DrillBaseline {
   paperVerifyMinutes: number;
   paperDuplicateAssignments: number;
   paperFalseRescuedCount: number;
+}
+
+export type DrillEventKind =
+  | 'assignment_made'
+  | 'assignment_blocked_duplicate'
+  | 'assignment_blocked_second_destination'
+  | 'assignment_blocked_other'
+  | 'pickup_confirmed'
+  | 'pickup_rejected_not_assigned'
+  | 'pickup_rejected_not_arrived'
+  | 'pickup_rejected_other';
+
+export interface DrillEvent {
+  kind: DrillEventKind;
+  atMs: number;
+  caseId?: string;
+  boatId?: string;
 }

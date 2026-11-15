@@ -43,6 +43,7 @@ import {
   CommandTask,
   DemoAccountId,
   DrillBaseline,
+  DrillEvent,
   FloodSubScenario,
   GeoPoint,
   HazardSeverity,
@@ -62,8 +63,18 @@ import {
 } from './types/rescue';
 import {
   accountToRole,
+  ActionOutcome,
+  AdvanceBoatPayload,
+  ConfirmPickupPayload,
+  NewCasePayload,
+  ReportIssuePayload,
+  UpdateLocationPayload,
+  applyQueuedActions,
+  getQueuedTargets,
+  projectQueuedState,
   advanceBoatStatus,
   advanceCommandTask,
+  applyFamilyLocationChange,
   approveOrWithdrawRoute,
   assignBoatToCase,
   assignOwnerAndFollowUp,
@@ -71,10 +82,16 @@ import {
   closeRoadSegmentAndWithdrawRoutes,
   confirmCasePriority,
   confirmPersonPickedUp,
+  drillEventForAssignment,
+  drillEventForPickup,
   enqueueLocalDraft,
   getOwnedCasesForAccount,
+  getPickupEligibility,
   getResidentRescueSummary,
   getVisibleMapDataForAccount,
+  isAppOnline,
+  moveCasePin,
+  PickupEligibility,
   reopenRoadSegment,
   RoleAlertItem,
   sendFamilyUpdate,
@@ -95,11 +112,13 @@ import { CommandCentrePanel } from './components/CommandCentrePanel';
 import { AlertsSection } from './components/AlertsSection';
 import { ReportModal, ReportModalMode } from './components/ReportModal';
 import { DrillBenchmarkView } from './components/DrillBenchmarkView';
+import { WaitingToSendPanel } from './components/WaitingToSendPanel';
 
 type ActiveView = 'map' | 'my_rescue' | 'dispatch' | 'workflow' | 'drill';
 type AdminSubTab = 'command_centre' | 'boats_cases';
 
-const STORAGE_KEY = 'flood_rescue_shah_alam_demo_v6';
+const STORAGE_KEY = 'flood_rescue_shah_alam_demo_v7';
+const STORAGE_KEY_PREFIX = 'flood_rescue_shah_alam_demo_';
 
 interface PersistedState {
   account: DemoAccountId;
@@ -122,17 +141,27 @@ interface PersistedState {
   areaInstructions: AreaInstruction[];
   drafts: LocalDraftAction[];
   baseline: DrillBaseline;
+  drillEvents: DrillEvent[];
 }
 
-function getFormattedTime(): string {
-  const now = new Date();
-  return now
+function formatClockTime(date: Date): string {
+  return date
     .toLocaleTimeString('en-MY', {
       hour: 'numeric',
       minute: '2-digit',
       hour12: true,
     })
     .toUpperCase();
+}
+
+function getFormattedTime(): string {
+  return formatClockTime(new Date());
+}
+
+// Reads the clock once so the display time and the epoch time always match.
+function getNow(): { at: string; atMs: number } {
+  const now = new Date();
+  return { at: formatClockTime(now), atMs: now.getTime() };
 }
 
 function isValidAccountId(val: unknown): val is DemoAccountId {
@@ -143,7 +172,24 @@ function isValidLang(val: unknown): val is LanguageCode {
   return val === 'en' || val === 'bm' || val === 'cn';
 }
 
+// Remove saved state from older demo versions so stale fictional personal data is not left behind.
+function removeOldSavedStates(): void {
+  try {
+    const oldKeys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(STORAGE_KEY_PREFIX) && key !== STORAGE_KEY) {
+        oldKeys.push(key);
+      }
+    }
+    oldKeys.forEach((key) => localStorage.removeItem(key));
+  } catch {
+    // Ignore unavailable storage
+  }
+}
+
 function loadInitialState(): PersistedState {
+  removeOldSavedStates();
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
@@ -173,6 +219,9 @@ function loadInitialState(): PersistedState {
             parsed.areaInstructions ?? INITIAL_AREA_INSTRUCTIONS,
           drafts: parsed.drafts ?? [],
           baseline: parsed.baseline ?? INITIAL_DRILL_BASELINE,
+          drillEvents: Array.isArray(parsed.drillEvents)
+            ? parsed.drillEvents
+            : [],
         };
       }
     }
@@ -200,7 +249,30 @@ function loadInitialState(): PersistedState {
     areaInstructions: INITIAL_AREA_INSTRUCTIONS,
     drafts: [],
     baseline: INITIAL_DRILL_BASELINE,
+    drillEvents: [],
   };
+}
+
+// Tracks the real browser connection. Starts from navigator.onLine (true when
+// navigator is unavailable) and follows the window online/offline events.
+function useBrowserOnline(): boolean {
+  const [browserOnline, setBrowserOnline] = useState<boolean>(() =>
+    typeof navigator === 'undefined' ? true : navigator.onLine
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => setBrowserOnline(true);
+    const handleOffline = () => setBrowserOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  return browserOnline;
 }
 
 export default function App() {
@@ -210,7 +282,9 @@ export default function App() {
     useState<AdminSubTab>('command_centre');
   const [account, setAccount] = useState<DemoAccountId>(initial.account);
   const [lang, setLang] = useState<LanguageCode>(initial.lang);
-  const [isOnline, setIsOnline] = useState<boolean>(true);
+  const browserOnline = useBrowserOnline();
+  const [demoOffline, setDemoOffline] = useState<boolean>(false);
+  const isOnline = isAppOnline(browserOnline, demoOffline);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchFocused, setSearchFocused] = useState<boolean>(false);
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
@@ -268,11 +342,27 @@ export default function App() {
   );
   const [drafts, setDrafts] = useState<LocalDraftAction[]>(initial.drafts);
   const [baseline, setBaseline] = useState<DrillBaseline>(initial.baseline);
+  const [drillEvents, setDrillEvents] = useState<DrillEvent[]>(
+    initial.drillEvents
+  );
 
   const searchWrapperRef = useRef<HTMLDivElement | null>(null);
   const mapSectionRef = useRef<HTMLElement | null>(null);
   const role = accountToRole(account);
   const t = TRANSLATIONS[lang];
+
+  // Toast when the real browser connection changes (skips the first render).
+  const prevBrowserOnlineRef = useRef<boolean>(browserOnline);
+  useEffect(() => {
+    if (prevBrowserOnlineRef.current === browserOnline) return;
+    prevBrowserOnlineRef.current = browserOnline;
+    setToastMessage(
+      browserOnline
+        ? `Connection restored · ${drafts.length} waiting to send.`
+        : 'No network connection. New actions wait to send.'
+    );
+    // Only react to connection changes; drafts.length is read at that moment.
+  }, [browserOnline]);
 
   useEffect(() => {
     try {
@@ -297,6 +387,7 @@ export default function App() {
         areaInstructions,
         drafts,
         baseline,
+        drillEvents,
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch {
@@ -323,6 +414,7 @@ export default function App() {
     areaInstructions,
     drafts,
     baseline,
+    drillEvents,
   ]);
 
   useEffect(() => {
@@ -393,9 +485,24 @@ export default function App() {
     ]
   );
 
+  // Case and boat ids referenced by queued items, for "Waiting to send" badges.
+  const queuedTargets = useMemo(() => getQueuedTargets(drafts), [drafts]);
+
+  // Rescue requests the resident made offline that have not been sent yet.
+  const residentQueuedRequestCount = useMemo(
+    () =>
+      drafts.filter(
+        (d) => d.payloadType === 'new_case' && d.actorRole === 'resident'
+      ).length,
+    [drafts]
+  );
+
   const residentBottomBarText = useMemo(() => {
     if (account !== 'resident') return undefined;
     if (!residentSummary.hasActiveRequest || !residentSummary.activeCase) {
+      if (residentQueuedRequestCount > 0) {
+        return `${residentQueuedRequestCount} request(s) waiting to send`;
+      }
       return `${t.noActiveRescue} · Tap to request rescue`;
     }
     const landmark = residentSummary.activeCase.pickupLandmark;
@@ -410,7 +517,7 @@ export default function App() {
       residentSummary.arrivedCount
     );
     return `${landmark} · ${summary}`;
-  }, [account, residentSummary, lang, t.noActiveRescue]);
+  }, [account, residentSummary, residentQueuedRequestCount, lang, t.noActiveRescue]);
 
   const searchSuggestions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -574,87 +681,50 @@ export default function App() {
     }
   };
 
-  const syncLocalDrafts = (pendingDrafts: LocalDraftAction[]) => {
-    if (pendingDrafts.length === 0) return;
-    const nowTime = getFormattedTime();
-
-    let nextCases: RescueCase[] = cases.map((c) => ({
-      ...c,
-      syncState: 'synced',
-    }));
-    let nextBoats: BoatUnit[] = boats;
-
-    for (const item of pendingDrafts) {
-      if (item.payloadType === 'update_location') {
-        const { caseId, pickupLandmark, confirmedBy, coords } = item.payload as {
-          caseId: string;
-          pickupLandmark: string;
-          confirmedBy: string;
-          coords?: GeoPoint;
-        };
-        nextCases = nextCases.map((c) =>
-          c.id === caseId
-            ? {
-                ...c,
-                pickupLandmark,
-                coordinates: coords ?? c.coordinates,
-                confirmedByWho: confirmedBy || c.confirmedByWho,
-                confirmedWhen: nowTime,
-                syncState: 'synced',
-              }
-            : c
-        );
-      } else if (item.payloadType === 'advance_boat') {
-        const { boatId, nextStatus, eta } = item.payload as {
-          boatId: string;
-          nextStatus: BoatStatus;
-          eta?: string;
-        };
-        const res = advanceBoatStatus(
-          nextBoats,
-          nextCases,
-          boatId,
-          nextStatus,
-          nowTime,
-          eta
-        );
-        nextBoats = res.boats;
-        nextCases = res.cases;
-      } else if (item.payloadType === 'confirm_pickup') {
-        const { caseId, boatId, crewLead } = item.payload as {
-          caseId: string;
-          boatId: string;
-          crewLead: string;
-        };
-        const res = confirmPersonPickedUp(
-          nextCases,
-          nextBoats,
-          caseId,
-          boatId,
-          nowTime,
-          crewLead
-        );
-        nextCases = res.cases;
-        nextBoats = res.boats;
-      }
+  // Sends the queue against the real shared state, oldest first (D4). Items
+  // that fail a rule stay in the queue with their reason and are never
+  // dropped without an explicit user action.
+  const syncLocalDrafts = () => {
+    if (!isOnline || drafts.length === 0) return;
+    const res = applyQueuedActions(
+      { cases, boats, roadClosures, outages },
+      drafts,
+      getNow()
+    );
+    setCases(res.state.cases);
+    setBoats(res.state.boats);
+    setRoadClosures(res.state.roadClosures);
+    setOutages(res.state.outages);
+    setDrafts(res.remaining);
+    if (res.events.length > 0) {
+      setDrillEvents((prev) => [...prev, ...res.events]);
     }
+    const sent = res.sentIds.length;
+    setToastMessage(
+      res.remaining.length > 0
+        ? `Sent ${sent}. ${res.remaining.length} not sent, see reasons.`
+        : `Sent ${sent}.`
+    );
+  };
 
-    setCases(nextCases);
-    setBoats(nextBoats);
-    setDrafts([]);
-    setToastMessage(`Sent ${pendingDrafts.length} saved draft(s) at ${nowTime}.`);
+  // Removes a rejected queue item. Only items that failed to send (and so
+  // carry an error) can be removed, and only from an explicit user action.
+  const discardQueuedItem = (id: string) => {
+    setDrafts((prev) => prev.filter((d) => d.id !== id || !d.error));
   };
 
   const handleToggleConnectivity = () => {
-    const nextOnline = !isOnline;
-    setIsOnline(nextOnline);
+    const nextDemoOffline = !demoOffline;
+    setDemoOffline(nextDemoOffline);
     setMenuOpen(false);
-    if (!nextOnline) {
-      setToastMessage('Offline mode active: drafts save locally.');
-    } else if (drafts.length > 0) {
+    if (nextDemoOffline) {
+      setToastMessage('Offline mode active: new actions are waiting to send.');
+    } else if (!browserOnline) {
       setToastMessage(
-        `Online restored · ${drafts.length} draft(s) ready to send.`
+        `No network connection · ${drafts.length} waiting to send.`
       );
+    } else if (drafts.length > 0) {
+      setToastMessage(`Online restored · ${drafts.length} waiting to send.`);
     }
   };
 
@@ -680,11 +750,12 @@ export default function App() {
     setAreaInstructions(INITIAL_AREA_INSTRUCTIONS);
     setDrafts([]);
     setBaseline(INITIAL_DRILL_BASELINE);
+    setDrillEvents([]);
     setSelectedCaseId('');
     setSelectedIncidentId(INITIAL_COMMAND_INCIDENTS[0].id);
     setSelectedMapEntity(null);
     setForcedLayerReveal(null);
-    setIsOnline(true);
+    setDemoOffline(false);
     setSearchQuery('');
     setTappedLocation(null);
     setPinMoveMode(false);
@@ -701,27 +772,50 @@ export default function App() {
     setReportModalOpen(true);
   };
 
+  // Desk-only writes need the shared system: while offline they are blocked
+  // with a "needs a connection" message and nothing is saved (D2).
+  const blockedOffline = (): boolean => {
+    if (isOnline) return false;
+    setToastMessage(t.needsConnectionMsg);
+    return true;
+  };
+
   // Pin & Case Handlers
   const handleMoveSelectedCasePin = (caseId: string, point: GeoPoint) => {
+    if (!isOnline) {
+      // Crew-side: kept as Waiting to send; shared cases change only when sent (D7).
+      const { at, atMs } = getNow();
+      const target = cases.find((c) => c.id === caseId);
+      const payload: UpdateLocationPayload = {
+        caseId,
+        mode: 'pin_move',
+        pickupLandmark: target?.pickupLandmark ?? '',
+        confirmedBy: target?.confirmedByWho ?? '',
+        coords: point,
+      };
+      setDrafts((prev) =>
+        enqueueLocalDraft(
+          prev,
+          {
+            actorRole: role,
+            summary: `Pickup pin move for ${target?.affectedPersonName ?? caseId} (${point.lat}, ${point.lng})`,
+            payloadType: 'update_location',
+            payload,
+          },
+          at,
+          atMs
+        )
+      );
+      setPinMoveMode(false);
+      setToastMessage(
+        `Pin move waiting to send (${point.lat}, ${point.lng}).`
+      );
+      return;
+    }
     const ts = getFormattedTime();
-    setCases((prev) =>
-      prev.map((c) =>
-        c.id === caseId
-          ? {
-              ...c,
-              coordinates: point,
-              confirmedWhen: ts,
-              syncState: isOnline ? 'synced' : 'local_draft',
-            }
-          : c
-      )
-    );
+    setCases((prev) => moveCasePin(prev, caseId, point, ts));
     setPinMoveMode(false);
-    setToastMessage(
-      isOnline
-        ? `Pickup pin moved (${point.lat}, ${point.lng}).`
-        : `Pin move saved as local draft (${point.lat}, ${point.lng}).`
-    );
+    setToastMessage(`Pickup pin moved (${point.lat}, ${point.lng}).`);
   };
 
   const handleReportLocationChange = (
@@ -730,59 +824,36 @@ export default function App() {
     confirmedBy: string,
     coords?: GeoPoint
   ) => {
-    const ts = getFormattedTime();
     if (!isOnline) {
-      setCases((prev) =>
-        prev.map((c) =>
-          c.id === caseId
-            ? {
-                ...c,
-                pickupLandmark: newLandmark,
-                coordinates: coords ?? c.coordinates,
-                confirmedByWho: confirmedBy,
-                confirmedWhen: ts,
-                syncState: 'local_draft',
-              }
-            : c
-        )
-      );
+      // Crew-side: no optimistic change; applied with this time when sent (D7).
+      const { at, atMs } = getNow();
+      const payload: UpdateLocationPayload = {
+        caseId,
+        mode: 'family_change',
+        pickupLandmark: newLandmark,
+        confirmedBy,
+        coords,
+      };
       setDrafts((prev) =>
         enqueueLocalDraft(
           prev,
           {
             actorRole: role,
-            summary: `Draft pickup move to "${newLandmark}"`,
+            summary: `Pickup point change to "${newLandmark}"`,
             payloadType: 'update_location',
-            payload: { caseId, pickupLandmark: newLandmark, confirmedBy, coords },
+            payload,
           },
-          ts
+          at,
+          atMs
         )
       );
+      setToastMessage(`Pickup point change to "${newLandmark}" is waiting to send.`);
       return;
     }
 
+    const ts = getFormattedTime();
     setCases((prev) =>
-      prev.map((c) =>
-        c.id === caseId
-          ? {
-              ...c,
-              pickupLandmark: newLandmark,
-              coordinates: coords ?? c.coordinates,
-              confirmedByWho: confirmedBy,
-              confirmedWhen: ts,
-              syncState: 'synced',
-              familyUpdates: [
-                ...c.familyUpdates,
-                {
-                  id: `fam-loc-${Date.now()}`,
-                  timestamp: ts,
-                  sender: 'Reporting Family',
-                  text: `Updated pickup point to "${newLandmark}" (confirmed by ${confirmedBy}).`,
-                },
-              ],
-            }
-          : c
-      )
+      applyFamilyLocationChange(prev, caseId, newLandmark, confirmedBy, coords, ts)
     );
   };
 
@@ -792,13 +863,15 @@ export default function App() {
     coords: GeoPoint,
     confirmedByWho: string
   ) => {
-    const ts = getFormattedTime();
+    if (blockedOffline()) return;
+    const { at: ts, atMs } = getNow();
     const res = verifyAndMovePickupPin(cases, boats, caseId, {
       pickupLandmark: landmark,
       coordinates: coords,
       verifiedBy: 'Rescue Coordinator (Demo)',
       timestamp: ts,
       confirmedByWho,
+      atMs,
     });
     setCases(res.cases);
     setBoats(res.boats);
@@ -809,6 +882,7 @@ export default function App() {
     owner: string,
     followUp: string
   ) => {
+    if (blockedOffline()) return;
     setCases((prev) =>
       assignOwnerAndFollowUp(prev, caseId, owner, followUp)
     );
@@ -819,6 +893,7 @@ export default function App() {
     urgency: UrgencyLevel,
     reason: string
   ) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     setCases((prev) =>
       confirmCasePriority(
@@ -833,8 +908,15 @@ export default function App() {
   };
 
   const handleAssignBoat = (caseId: string, boatId: string) => {
-    const ts = getFormattedTime();
+    if (blockedOffline()) {
+      return { ok: false, error: t.needsConnectionMsg };
+    }
+    const { at: ts, atMs } = getNow();
     const res = assignBoatToCase(cases, boats, caseId, boatId, ts);
+    setDrillEvents((prev) => [
+      ...prev,
+      drillEventForAssignment(res, atMs, caseId, boatId),
+    ]);
     if (res.ok) {
       setCases(res.cases);
       setBoats(res.boats);
@@ -843,6 +925,7 @@ export default function App() {
   };
 
   const handleSendFamilyUpdate = (caseId: string, message: string) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     setCases((prev) =>
       sendFamilyUpdate(prev, caseId, 'Rescue Coordinator (Demo)', message, ts)
@@ -853,31 +936,38 @@ export default function App() {
     boatId: string,
     nextStatus: BoatStatus,
     eta?: string
-  ) => {
-    const ts = getFormattedTime();
+  ): ActionOutcome => {
     if (!isOnline) {
+      const { at, atMs } = getNow();
       const boat = boats.find((b) => b.id === boatId);
+      const boatName = boat?.name ?? boatId;
+      const statusLabel = nextStatus.replace(/_/g, ' ');
+      const payload: AdvanceBoatPayload = { boatId, nextStatus, eta };
       setDrafts((prev) =>
         enqueueLocalDraft(
           prev,
           {
             actorRole: role,
-            summary: `Draft: ${boat?.name ?? boatId} marked ${nextStatus.replace(/_/g, ' ')}`,
+            summary: `${boatName} marked ${statusLabel}`,
             payloadType: 'advance_boat',
-            payload: { boatId, nextStatus, eta },
+            payload,
           },
-          ts
+          at,
+          atMs
         )
       );
-      setToastMessage(`Saved local draft: ${boat?.name ?? boatId} status.`);
-      return;
+      setToastMessage(`${boatName} marked ${statusLabel} · Waiting to send.`);
+      return { ok: true, queued: true };
     }
+    const ts = getFormattedTime();
     const res = advanceBoatStatus(boats, cases, boatId, nextStatus, ts, eta);
     setBoats(res.boats);
     setCases(res.cases);
+    return { ok: true };
   };
 
   const handleUpdateBoatLocation = (boatId: string, point: GeoPoint) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     setBoats((prev) => updateBoatLocation(prev, boatId, point, ts));
   };
@@ -887,6 +977,7 @@ export default function App() {
     supplies: BoatUnit['supplies'],
     eta: string
   ) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     setBoats((prev) =>
       prev.map((b) =>
@@ -902,43 +993,79 @@ export default function App() {
     );
   };
 
-  const handleConfirmPersonPickedUp = (caseId: string, boatId: string) => {
-    const ts = getFormattedTime();
-    const boat = boats.find((b) => b.id === boatId);
-    const crewLead = boat?.crewLead ?? 'Demo Crew';
+  // Offline, a queued "arrived" counts toward pickup eligibility (D5). The
+  // projected state is only used for this check and is never shown as the
+  // current status; online, the real shared state is used.
+  const pickupEligibilityFor = (caseId: string): PickupEligibility => {
+    if (isOnline) return getPickupEligibility(cases, boats, caseId);
+    const projected = projectQueuedState(
+      { cases, boats, roadClosures, outages },
+      drafts
+    );
+    return getPickupEligibility(projected.cases, projected.boats, caseId);
+  };
+
+  const handleConfirmPersonPickedUp = (
+    caseId: string,
+    boatId: string
+  ): ActionOutcome => {
+    const { at: ts, atMs } = getNow();
 
     if (!isOnline) {
-      const target = cases.find((c) => c.id === caseId);
-      setCases((prev) =>
-        prev.map((c) =>
-          c.id === caseId ? { ...c, syncState: 'local_draft' } : c
-        )
+      // Check against the real state plus still-valid queued items (D5), so a
+      // queued "arrived" counts. The send step re-checks against the real state.
+      const projected = projectQueuedState(
+        { cases, boats, roadClosures, outages },
+        drafts
       );
+      const check = confirmPersonPickedUp(
+        projected.cases,
+        projected.boats,
+        caseId,
+        boatId,
+        ts
+      );
+      if (!check.ok) {
+        const error = check.error ?? 'Pickup could not be confirmed.';
+        setDrillEvents((prev) => [
+          ...prev,
+          drillEventForPickup(check, atMs, caseId, boatId),
+        ]);
+        setToastMessage(error);
+        return { ok: false, error };
+      }
+      const target = projected.cases.find((c) => c.id === caseId);
+      const payload: ConfirmPickupPayload = { caseId, boatId };
       setDrafts((prev) =>
         enqueueLocalDraft(
           prev,
           {
             actorRole: role,
-            summary: `Draft: Person picked up for ${target?.affectedPersonName ?? caseId}`,
+            summary: `Person picked up: ${target?.affectedPersonName ?? caseId}`,
             payloadType: 'confirm_pickup',
-            payload: { caseId, boatId, crewLead },
+            payload,
           },
-          ts
+          ts,
+          atMs
         )
       );
-      return;
+      setToastMessage('Pickup confirmation waiting to send.');
+      return { ok: true, queued: true };
     }
 
-    const res = confirmPersonPickedUp(
-      cases,
-      boats,
-      caseId,
-      boatId,
-      ts,
-      crewLead
-    );
+    const res = confirmPersonPickedUp(cases, boats, caseId, boatId, ts);
+    setDrillEvents((prev) => [
+      ...prev,
+      drillEventForPickup(res, atMs, caseId, boatId),
+    ]);
+    if (!res.ok) {
+      const error = res.error ?? 'Pickup could not be confirmed.';
+      setToastMessage(error);
+      return { ok: false, error };
+    }
     setCases(res.cases);
     setBoats(res.boats);
+    return { ok: true };
   };
 
   const handleUpdatePps = (
@@ -946,6 +1073,7 @@ export default function App() {
     occupancy: number,
     status: PPSCenter['status']
   ) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     const acceptingArrivals = status !== 'Closed' && status !== 'Standby';
     const res = updatePpsShelterStatus(
@@ -964,6 +1092,7 @@ export default function App() {
 
   // Government Command Centre Handlers
   const handleVerifyIncident = (incidentId: string) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     setIncidents((prev) =>
       prev.map((inc) =>
@@ -984,6 +1113,7 @@ export default function App() {
     steps: string[],
     floodScenario?: FloodSubScenario
   ) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     setIncidents((prev) =>
       prev.map((inc) =>
@@ -1009,6 +1139,7 @@ export default function App() {
     isPumpTask?: boolean;
     linkedRoadId?: string;
   }) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     const newTask: CommandTask = {
       id: `task-${Date.now().toString().slice(-4)}`,
@@ -1041,6 +1172,7 @@ export default function App() {
     crewNote: string,
     confirmPumpReopen?: boolean
   ) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     setTasks((prev) =>
       advanceCommandTask(
@@ -1060,6 +1192,7 @@ export default function App() {
     severity: HazardSeverity,
     reason: string
   ) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     setHazardZones((prev) =>
       updateHazardZoneSeverity(
@@ -1083,6 +1216,7 @@ export default function App() {
     independentTravelNote: string;
     urgent: boolean;
   }) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     setAreaInstructions((prev) => {
       const existing = prev.find((i) => i.zoneId === payload.zoneId);
@@ -1115,6 +1249,7 @@ export default function App() {
   };
 
   const handleCloseRoadSegment = (roadId: string, reason: string) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     const res = closeRoadSegmentAndWithdrawRoutes(
       roadClosures,
@@ -1131,6 +1266,9 @@ export default function App() {
   };
 
   const handleReopenRoadSegment = (roadId: string) => {
+    if (blockedOffline()) {
+      return { ok: false, error: t.needsConnectionMsg };
+    }
     const ts = getFormattedTime();
     const res = reopenRoadSegment(
       roadClosures,
@@ -1154,6 +1292,9 @@ export default function App() {
       reason?: string;
     }
   ) => {
+    if (blockedOffline()) {
+      return { ok: false, error: t.needsConnectionMsg };
+    }
     const ts = getFormattedTime();
     const res = approveOrWithdrawRoute(
       evacRoutes,
@@ -1176,6 +1317,7 @@ export default function App() {
     status: PPSCenter['status'],
     acceptingArrivals: boolean
   ) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     const res = updatePpsShelterStatus(
       ppsCenters,
@@ -1197,6 +1339,7 @@ export default function App() {
     cause: string,
     etr: string
   ) => {
+    if (blockedOffline()) return;
     const ts = getFormattedTime();
     setOutages((prev) =>
       prev.map((o) =>
@@ -1236,7 +1379,7 @@ export default function App() {
     notes: string;
     photoAttached: boolean;
   }) => {
-    const ts = getFormattedTime();
+    const { at: ts, atMs } = getNow();
     const newId = `case-${Date.now().toString().slice(-4)}`;
     const isVerified = !payload.pickupLandmark
       .toLowerCase()
@@ -1264,6 +1407,9 @@ export default function App() {
       confirmedWhen: payload.confirmedWhen,
       lastContactTime: payload.lastContactTime,
       reportedAt: ts,
+      // Online submissions start the drill clock now; a queued request gets
+      // reportedAtMs from the queue item's time when it is sent.
+      ...(isOnline ? { reportedAtMs: atMs } : {}),
       reportSource: payload.reportSource,
       reporterName: payload.reporterName,
       reporterLocation: payload.reporterLocation,
@@ -1292,49 +1438,61 @@ export default function App() {
         lowLyingTerrain: `Shah Alam (${payload.areaName})`,
         roadAccess: 'Checking nearby road closures',
       },
-      familyUpdates: [
-        {
-          id: `init-${newId}`,
-          timestamp: ts,
-          sender: isOnline ? 'System Demo' : 'Local Draft',
-          text: isOnline
-            ? 'Demo request received. Coordinator will review danger and pickup location.'
-            : 'Saved locally while offline (NOT sent or delivered).',
-        },
-      ],
-      syncState: isOnline ? 'synced' : 'local_draft',
+      familyUpdates: isOnline
+        ? [
+            {
+              id: `init-${newId}`,
+              timestamp: ts,
+              sender: 'System Demo',
+              text: 'Demo request received. Coordinator will review danger and pickup location.',
+            },
+          ]
+        : [
+            {
+              // Replaced by the "made offline / sent at" update when the queue is sent.
+              id: `init-${newId}`,
+              timestamp: ts,
+              sender: 'This device',
+              text: 'Waiting to send. Not yet sent or delivered.',
+            },
+          ],
+      syncState: 'synced',
     };
 
-    setCases((prev) => [newCase, ...prev]);
     if (account === 'guest') {
       setAccount('resident');
     }
-    setSelectedCaseId(newId);
     setSelectedMapEntity(null);
     setActiveView('map');
     setFocusRequest({ point: { ...payload.coordinates }, zoom: 15 });
 
     if (!isOnline) {
+      // Held in the queue only: not in cases, map data or alerts until sent (D6).
+      const queued: NewCasePayload = { rescueCase: newCase };
       setDrafts((prev) =>
         enqueueLocalDraft(
           prev,
           {
             actorRole: role,
-            summary: `Local draft rescue request for ${payload.affectedPersonName}`,
+            summary: `Rescue request for ${payload.affectedPersonName}`,
             payloadType: 'new_case',
-            payload: { caseId: newId },
+            payload: queued,
           },
-          ts
+          ts,
+          atMs
         )
       );
       setToastMessage(
-        `Saved local draft for ${payload.affectedPersonName}.`
+        `Rescue request for ${payload.affectedPersonName} is waiting to send.`
       );
-    } else {
-      setToastMessage(
-        `Rescue request created for ${payload.affectedPersonName}.`
-      );
+      return;
     }
+
+    setCases((prev) => [newCase, ...prev]);
+    setSelectedCaseId(newId);
+    setToastMessage(
+      `Rescue request created for ${payload.affectedPersonName}.`
+    );
   };
 
   const handleSubmitLocalIssue = (payload: {
@@ -1345,62 +1503,73 @@ export default function App() {
     details: string;
     coordinates: GeoPoint;
   }) => {
-    const ts = getFormattedTime();
-    if (payload.issueKind === 'road') {
-      setRoadClosures((prev) => [
-        {
-          id: `road-${Date.now()}`,
-          roadName: payload.locationName,
-          areaName: payload.areaName,
-          postcode: payload.postcode,
-          reason: `${payload.details} (Demo report)`,
-          passableByBoatOnly: true,
-          verified: false,
-          closed: true,
-          coordinates: payload.coordinates,
-          reportedAt: `${ts} (Demo)`,
-          source: 'Resident Report (Pending verification)',
-        },
-        ...prev,
-      ]);
-    } else {
-      setOutages((prev) => [
-        {
-          id: `outage-${Date.now()}`,
-          areaName: `${payload.locationName} (${payload.areaName})`,
-          postcode: payload.postcode,
-          status: 'Not yet confirmed',
-          confirmedCause: 'Not yet confirmed',
-          estimatedRestoration: 'Not yet confirmed',
-          affectedHouseholds: null,
-          center: payload.coordinates,
-          radiusMeters: 300,
-          updatedAt: `${ts} (Demo)`,
-          source: 'Resident Report (Pending utility verification)',
-        },
-        ...prev,
-      ]);
-    }
+    const { at: ts, atMs } = getNow();
+    const issue: ReportIssuePayload =
+      payload.issueKind === 'road'
+        ? {
+            issueKind: 'road',
+            roadClosure: {
+              id: `road-${Date.now()}`,
+              roadName: payload.locationName,
+              areaName: payload.areaName,
+              postcode: payload.postcode,
+              reason: `${payload.details} (Demo report)`,
+              passableByBoatOnly: true,
+              verified: false,
+              closed: true,
+              coordinates: payload.coordinates,
+              reportedAt: `${ts} (Demo)`,
+              source: 'Resident Report (Pending verification)',
+            },
+          }
+        : {
+            issueKind: 'outage',
+            outage: {
+              id: `outage-${Date.now()}`,
+              areaName: `${payload.locationName} (${payload.areaName})`,
+              postcode: payload.postcode,
+              status: 'Not yet confirmed',
+              confirmedCause: 'Not yet confirmed',
+              estimatedRestoration: 'Not yet confirmed',
+              affectedHouseholds: null,
+              center: payload.coordinates,
+              radiusMeters: 300,
+              updatedAt: `${ts} (Demo)`,
+              source: 'Resident Report (Pending utility verification)',
+            },
+          };
 
     if (!isOnline) {
+      // Held in the queue only: not on the map or in alerts until sent (D6).
       setDrafts((prev) =>
         enqueueLocalDraft(
           prev,
           {
             actorRole: role,
-            summary: `Local draft ${payload.issueKind}: ${payload.locationName}`,
+            summary: `Local issue (${payload.issueKind}): ${payload.locationName}`,
             payloadType: 'report_issue',
-            payload,
+            payload: issue,
           },
-          ts
+          ts,
+          atMs
         )
       );
-      setToastMessage(`Saved local issue draft: ${payload.locationName}.`);
-    } else {
       setToastMessage(
-        `Posted to Shah Alam demo map: ${payload.locationName}.`
+        `Local issue (${payload.issueKind}): ${payload.locationName} is waiting to send.`
       );
+      return;
     }
+
+    if (issue.issueKind === 'road') {
+      const roadClosure = issue.roadClosure;
+      setRoadClosures((prev) => [roadClosure, ...prev]);
+    } else {
+      const outage = issue.outage;
+      setOutages((prev) => [outage, ...prev]);
+    }
+    setToastMessage(
+      `Posted to Shah Alam demo map: ${payload.locationName}.`
+    );
   };
 
   const handleTriggerDemoScenario = (
@@ -1411,13 +1580,13 @@ export default function App() {
       | 'community_support'
   ) => {
     if (scenario === 'continuity') {
-      setIsOnline(false);
+      setDemoOffline(true);
       setActiveView('map');
       setToastMessage('Offline mode active: saved cases remain readable.');
     } else if (scenario === 'rapid_response') {
       handleAccountSwitch('admin');
-      setIsOnline(true);
-      setSelectedCaseId('case-kampung');
+      setDemoOffline(false);
+      setSelectedCaseId('case-devi');
       setAdminSubTab('boats_cases');
       setActiveView('dispatch');
     } else if (scenario === 'data_protection') {
@@ -1747,17 +1916,23 @@ export default function App() {
                         <span>{isOnline ? t.onlineBtn : t.offlineBtn}</span>
                       </button>
 
-                      {drafts.length > 0 && (
-                        <button
-                          type="button"
-                          disabled={!isOnline}
-                          onClick={() => syncLocalDrafts(drafts)}
-                          className="w-full px-2.5 py-2 text-xs font-semibold text-amber-950 bg-amber-50 border border-amber-300 rounded-lg disabled:opacity-60 cursor-pointer"
+                      {!browserOnline && (
+                        <p
+                          role="status"
+                          className="px-2.5 text-[11px] font-medium text-amber-900"
                         >
-                          {isOnline
-                            ? t.sendDraftsBtn(drafts.length)
-                            : t.localDraftsBtn(drafts.length)}
-                        </button>
+                          {t.browserOfflineNote}
+                        </p>
+                      )}
+
+                      {drafts.length > 0 && (
+                        <WaitingToSendPanel
+                          lang={lang}
+                          items={drafts}
+                          isOnline={isOnline}
+                          onSend={syncLocalDrafts}
+                          onDiscard={discardQueuedItem}
+                        />
                       )}
 
                       <button
@@ -1797,6 +1972,7 @@ export default function App() {
                 areaInstructions={areaInstructions}
                 incidents={incidents}
                 isOnline={isOnline}
+                queuedBoatIds={queuedTargets.boatIds}
                 selectedCaseId={selectedCaseId}
                 onSelectCase={setSelectedCaseId}
                 selectedEntity={selectedMapEntity}
@@ -1811,7 +1987,10 @@ export default function App() {
                 onLocateMe={handleLocateMe}
                 residentBottomBarText={residentBottomBarText}
                 onOpenResidentDetails={() => {
-                  if (residentSummary.hasActiveRequest) {
+                  if (
+                    residentSummary.hasActiveRequest ||
+                    residentQueuedRequestCount > 0
+                  ) {
                     setActiveView('my_rescue');
                   } else {
                     openReportDialog('family_rescue');
@@ -1823,6 +2002,7 @@ export default function App() {
                 onAdminAdvanceBoatStatus={handleAdvanceBoatStatus}
                 onAdminUpdateBoatLocation={handleUpdateBoatLocation}
                 onAdminConfirmPickedUp={handleConfirmPersonPickedUp}
+                getPickupEligibility={pickupEligibilityFor}
                 onAdminConfirmPriority={handleConfirmPriority}
                 onOpenCommandCentreIncident={(incidentId) => {
                   setSelectedIncidentId(incidentId);
@@ -1922,6 +2102,10 @@ export default function App() {
                 selectedCaseId={selectedCaseId}
                 onSelectCase={setSelectedCaseId}
                 isOnline={isOnline}
+                waitingItems={drafts.filter(
+                  (d) => d.actorRole !== 'coordinator'
+                )}
+                queuedCaseIds={queuedTargets.caseIds}
                 tappedLocation={tappedLocation}
                 onReportLocationChange={handleReportLocationChange}
                 onRequestRescue={() => openReportDialog('family_rescue')}
@@ -1970,6 +2154,7 @@ export default function App() {
                   <CommandCentrePanel
                     account={account}
                     onSwitchAccount={handleAccountSwitch}
+                    isOnline={isOnline}
                     incidents={incidents}
                     selectedIncidentId={selectedIncidentId}
                     onSelectIncident={setSelectedIncidentId}
@@ -2014,6 +2199,8 @@ export default function App() {
                     lang={lang}
                     onSwitchAccount={handleAccountSwitch}
                     isOnline={isOnline}
+                    queuedCaseIds={queuedTargets.caseIds}
+                    queuedBoatIds={queuedTargets.boatIds}
                     cases={cases}
                     boats={boats}
                     ppsCenters={ppsCenters}
@@ -2030,6 +2217,7 @@ export default function App() {
                     onUpdateBoatLocation={handleUpdateBoatLocation}
                     onUpdateBoatResources={handleUpdateBoatResources}
                     onConfirmPersonPickedUp={handleConfirmPersonPickedUp}
+                    getPickupEligibility={pickupEligibilityFor}
                     onUpdatePps={handleUpdatePps}
                     onUpdateOutage={handleUpdateOutage}
                   />
@@ -2108,7 +2296,7 @@ export default function App() {
               <DrillBenchmarkView
                 lang={lang}
                 cases={cases}
-                boats={boats}
+                drillEvents={drillEvents}
                 baseline={baseline}
                 onUpdateBaseline={setBaseline}
                 onTriggerDemoScenario={handleTriggerDemoScenario}
